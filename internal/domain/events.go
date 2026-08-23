@@ -16,9 +16,9 @@ type AccountOpened struct {
 	Aggregate      string
 	Type           string
 	Seq            int
-	Occurred        time.Time
-	ID              string
-	InitialBalance  float64
+	Occurred       time.Time
+	ID             string
+	InitialBalance float64
 }
 
 func (e AccountOpened) AggregateID() string   { return e.Aggregate }
@@ -31,7 +31,7 @@ type MoneyDebited struct {
 	Aggregate string
 	Type      string
 	Seq       int
-	Occurred   time.Time
+	Occurred  time.Time
 	ID        string
 	Amount    float64
 }
@@ -46,7 +46,7 @@ type MoneyCredited struct {
 	Aggregate string
 	Type      string
 	Seq       int
-	Occurred   time.Time
+	Occurred  time.Time
 	ID        string
 	Amount    float64
 }

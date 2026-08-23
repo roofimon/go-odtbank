@@ -77,7 +77,7 @@ func (s *TransferService) Transfer(amount float64, srcID, dstID string) (*domain
 			Aggregate: srcID,
 			Type:      "MoneyDebited",
 			Seq:       len(srcEvents),
-			Occurred:   now,
+			Occurred:  now,
 			ID:        srcID,
 			Amount:    fee,
 		}
@@ -91,7 +91,7 @@ func (s *TransferService) Transfer(amount float64, srcID, dstID string) (*domain
 		Aggregate: srcID,
 		Type:      "MoneyDebited",
 		Seq:       len(srcEvents),
-		Occurred:   now,
+		Occurred:  now,
 		ID:        srcID,
 		Amount:    amount,
 	}
@@ -103,7 +103,7 @@ func (s *TransferService) Transfer(amount float64, srcID, dstID string) (*domain
 		Aggregate: dstID,
 		Type:      "MoneyCredited",
 		Seq:       len(dstEvents),
-		Occurred:   now,
+		Occurred:  now,
 		ID:        dstID,
 		Amount:    amount,
 	}

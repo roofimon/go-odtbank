@@ -22,7 +22,7 @@ func TestTransfer_AppendsEventsAndReplaysState(t *testing.T) {
 			Aggregate:      id,
 			Type:           "AccountOpened",
 			Seq:            0,
-			Occurred:        time.Now(),
+			Occurred:       time.Now(),
 			ID:             id,
 			InitialBalance: balance,
 		}, 0); err != nil {
