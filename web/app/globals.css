@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+/* ── Coinbase design tokens ──────────────────────────────────────────── */
+:root {
+  --cb-bg: #f8f9fb;
+  --cb-surface: #ffffff;
+  --cb-surface-2: #f2f4f8;
+  --cb-brand-soft: #eef3ff;
+  --cb-border: #e3e8f2;
+  --cb-border-strong: #c9d0dd;
+  --cb-text: #1e1e24;
+  --cb-text-2: #7d7d8e;
+  --cb-text-muted: #9ea3af;
+  --cb-brand: #0052ff;
+  --cb-brand-hover: #0044c9;
+  --cb-positive: #0a7b43;
+  --cb-positive-soft: #e7f5ee;
+  --cb-negative: #d72a20;
+  --cb-negative-soft: #fdecec;
+  --cb-warning: #e88a1b;
+  --cb-warning-soft: #fff6e9;
+
+  --background: var(--cb-bg);
+  --foreground: var(--cb-text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cb-bg: #16161c;
+    --cb-surface: #1e1e26;
+    --cb-surface-2: #2a2a35;
+    --cb-brand-soft: #16233d;
+    --cb-border: #2e2e3a;
+    --cb-border-strong: #3d3d4d;
+    --cb-text: #e8e9ed;
+    --cb-text-2: #a5aab5;
+    --cb-text-muted: #7a7f8c;
+    --cb-brand: #2e7bff;
+    --cb-brand-hover: #4c90ff;
+    --cb-positive: #21c277;
+    --cb-positive-soft: #0e2a1e;
+    --cb-negative: #ff6b65;
+    --cb-negative-soft: #3a1515;
+    --cb-warning: #ffb020;
+    --cb-warning-soft: #33270f;
+
+    --background: var(--cb-bg);
+    --foreground: var(--cb-text);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--cb-surface);
+  --color-surface-2: var(--cb-surface-2);
+  --color-brand-soft: var(--cb-brand-soft);
+  --color-border: var(--cb-border);
+  --color-border-strong: var(--cb-border-strong);
+  --color-text: var(--cb-text);
+  --color-text-2: var(--cb-text-2);
+  --color-text-muted: var(--cb-text-muted);
+  --color-brand: var(--cb-brand);
+  --color-brand-hover: var(--cb-brand-hover);
+  --color-positive: var(--cb-positive);
+  --color-positive-soft: var(--cb-positive-soft);
+  --color-negative: var(--cb-negative);
+  --color-negative-soft: var(--cb-negative-soft);
+  --color-warning: var(--cb-warning);
+  --color-warning-soft: var(--cb-warning-soft);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--cb-bg);
+  color: var(--cb-text);
+  font-family: var(--font-geist-sans), system-ui, Arial, Helvetica, sans-serif;
+}
