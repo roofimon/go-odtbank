@@ -13,7 +13,7 @@ A small Go HTTP service that supports money transfers and account deposits. The 
 - **Policy** encapsulates fee calculation and service-availability rules.
 - **Event bus** publishes a `TransferCompletedEvent` after each successful transfer (the integration event, distinct from the per-account stored events).
 
-The HTTP entry point wires all of these together and serves transfer, deposit, account-list, and event-log routes.
+The HTTP entry point wires dependencies and delegates transfer, deposit, account-list, and event-log routes to `internal/httpapi`.
 
 ## Project Layout
 
@@ -44,6 +44,8 @@ The HTTP entry point wires all of these together and serves transfer, deposit, a
     │   └── policies.go        # Flat / Zero / Variable fee policies + time service
     ├── eventbus/
     │   └── event_bus.go       # In-process pub/sub for TransferCompletedEvent
+    ├── httpapi/
+    │   └── router.go          # Router, handlers, DTOs, error mapping, and CORS
     └── eventstore/
         ├── store.go           # Store interface + ErrConcurrencyConflict
         ├── memory_store.go    # In-memory append-only log
@@ -334,6 +336,7 @@ All dependencies point inward toward `internal/domain`:
 - `domain` defines the interfaces (`AccountRepository`, `FeePolicy`, `TimeService`, `TransferService`) and the entities (`Account`, `Event`).
 - `service` depends on `domain` and the `eventstore.Store` interface.
 - `eventstore` (memory + Postgres) depends on `domain`.
+- `httpapi` owns the HTTP transport and calls domain services plus the event store's read operations.
 - `repository`, `policy`, and `eventbus` depend on `domain`.
 - `cmd/server` depends on everything to wire the graph.
 
