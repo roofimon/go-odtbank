@@ -1,19 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"go-odtbank/internal/domain"
 	"go-odtbank/internal/eventbus"
 	"go-odtbank/internal/eventstore"
 	"go-odtbank/internal/policy"
 	"go-odtbank/internal/repository"
 	"go-odtbank/internal/service"
-	"log"
-	"net/http"
-	"time"
-
-	"github.com/gorilla/mux"
 )
 
 type TransferRequest struct {
@@ -24,9 +28,15 @@ type TransferRequest struct {
 
 func main() {
 	// 1. Initialize infrastructure
-	store := eventstore.NewMemoryStore()
-	seedAccount(store, "acc1", 100.0)
-	seedAccount(store, "acc2", 50.0)
+	store, err := openStore(context.Background())
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
+	defer closeStore(store)
+
+	if err := seedIfEmpty(store); err != nil {
+		log.Fatalf("seed accounts: %v", err)
+	}
 
 	repo := repository.NewMemoryAccountRepository(store)
 
@@ -75,14 +85,63 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-// seedAccount appends an AccountOpened event so the aggregate exists in the store.
-func seedAccount(store eventstore.Store, id string, initialBalance float64) {
-	_ = store.Append(domain.AccountOpened{
-		Aggregate:      id,
-		Type:           "AccountOpened",
-		Seq:            0,
-		Occurred:        time.Now(),
-		ID:             id,
-		InitialBalance: initialBalance,
-	}, 0)
+// openStore picks the implementation based on whether DATABASE_URL is set.
+// If set, it connects to Postgres. Otherwise it falls back to the in-memory store.
+func openStore(ctx context.Context) (eventstore.Store, error) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		fmt.Println("[store] DATABASE_URL not set, using in-memory store")
+		return eventstore.NewMemoryStore(), nil
+	}
+
+	fmt.Println("[store] DATABASE_URL set, connecting to Postgres")
+	pgCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(pgCtx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("pgxpool.New: %w", err)
+	}
+	if err := pool.Ping(pgCtx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+	return eventstore.NewPostgresStore(pool), nil
+}
+
+func closeStore(store eventstore.Store) {
+	if pg, ok := store.(*eventstore.PostgresStore); ok {
+		pg.Close()
+	}
+}
+
+// seedIfEmpty appends AccountOpened events for the demo accounts if they don't
+// exist yet. Idempotent — running twice does nothing on the second run.
+func seedIfEmpty(store eventstore.Store) error {
+	for _, acc := range []struct {
+		id     string
+		amount float64
+	}{
+		{"acc1", 100.0},
+		{"acc2", 50.0},
+	} {
+		events, err := store.Load(acc.id)
+		if err != nil {
+			return err
+		}
+		if len(events) > 0 {
+			continue
+		}
+		if err := store.Append(domain.AccountOpened{
+			Aggregate:      acc.id,
+			Type:           "AccountOpened",
+			Seq:            0,
+			Occurred:        time.Now(),
+			ID:             acc.id,
+			InitialBalance: acc.amount,
+		}, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }

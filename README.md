@@ -1,16 +1,17 @@
 # go-odtbank
 
-A small Go HTTP service that exposes a single money-transfer endpoint, structured around a clean / hexagonal layout with the domain at the center and infrastructure injected via interfaces.
+A small Go HTTP service that exposes a single money-transfer endpoint. The account ledger is **event-sourced**: account state is derived from an append-only event log, not mutated in place. Two interchangeable store implementations ship — in-memory and Postgres.
 
 ## Overview
 
-`go-odtbank` demonstrates a minimal but realistic layered Go backend:
-
-- **Domain** defines entities and contracts with no external dependencies.
-- **Service** holds the core use case (transfer money between accounts).
-- **Repository** persists accounts in memory.
+- **Domain** defines entities and contracts with no external dependencies. `Account` is a stateless struct; current state is folded from events.
+- **Service** holds the core use case (transfer money between accounts), orchestrating event appends against an `eventstore.Store`.
+- **Event store** persists the append-only log. Two implementations:
+  - `eventstore.MemoryStore` — used for tests and zero-setup local runs.
+  - `eventstore.PostgresStore` — backed by a single `events` table, gated on the `DATABASE_URL` env var.
+- **Repository** is a thin projection over the event store (replays events on demand).
 - **Policy** encapsulates fee calculation and service-availability rules.
-- **Event bus** publishes a `TransferCompletedEvent` after each successful transfer.
+- **Event bus** publishes a `TransferCompletedEvent` after each successful transfer (the integration event, distinct from the per-account stored events).
 
 The HTTP entry point wires all of these together and serves a single `POST /transfer` route.
 
@@ -20,58 +21,123 @@ The HTTP entry point wires all of these together and serves a single `POST /tran
 .
 ├── go.mod
 ├── go.sum
+├── docker-compose.yml         # Local Postgres for development
+├── Makefile                   # up / down / migrate / run / test
+├── migrations/                # Plain SQL migrations for the `events` table
+│   ├── 0001_init.up.sql
+│   └── 0001_init.down.sql
 ├── cmd/
 │   └── server/
 │       └── main.go            # Entry point: wires dependencies, starts HTTP server
 └── internal/
     ├── domain/                # Entities + interface contracts (no external deps)
-    │   ├── account.go         # Account, TransferReceipt, events, errors
+    │   ├── account.go         # Account, TransferReceipt, ReplayAccount, errors
+    │   ├── events.go          # Event interface + AccountOpened / MoneyDebited / MoneyCredited
     │   └── interfaces.go      # AccountRepository, FeePolicy, TimeService, TransferService
     ├── service/
-    │   └── transfer_service.go # TransferService — the core use case
+    │   ├── transfer_service.go        # Core use case: load → replay → emit events
+    │   └── transfer_service_test.go   # Smoke test against in-memory store
     ├── repository/
-    │   └── memory_repo.go     # In-memory AccountRepository (mutex-protected map)
+    │   └── memory_repo.go     # Thin projection over eventstore (replays on read)
     ├── policy/
     │   └── policies.go        # Flat / Zero / Variable fee policies + time service
-    └── eventbus/
-        └── event_bus.go       # In-process pub/sub for TransferCompletedEvent
+    ├── eventbus/
+    │   └── event_bus.go       # In-process pub/sub for TransferCompletedEvent
+    └── eventstore/
+        ├── store.go           # Store interface + ErrConcurrencyConflict
+        ├── memory_store.go    # In-memory append-only log
+        └── postgres_store.go  # Postgres-backed append-only log (pgx/v5)
 ```
 
 ## Requirements
 
 - Go **1.27.0** or newer (per `go.mod`).
 - Module path: `go-odtbank`.
+- For the Postgres path: a running Postgres instance reachable via `DATABASE_URL`, plus the [`migrate`](https://github.com/golang-migrate/migrate) CLI for applying migrations.
 
 ## Dependencies
 
-| Module                       | Purpose                        |
-| ---------------------------- | ------------------------------ |
-| `github.com/gorilla/mux` v1.8.1 | HTTP request routing and method matching. |
+| Module                                    | Purpose                                              |
+| ----------------------------------------- | ---------------------------------------------------- |
+| `github.com/gorilla/mux` v1.8.1           | HTTP request routing and method matching.              |
+| `github.com/jackc/pgx/v5` v5.x            | Postgres driver (only pulled in for the Postgres path). |
 
-## Build & Run
+## Build & Test
 
 From the project root:
 
 ```bash
-# Build all packages
 go build ./...
+go test ./...
+```
 
-# Run the server
+## Run — In-memory (zero setup)
+
+```bash
 go run ./cmd/server
 ```
 
-The server listens on `:8080`. On startup it prints:
-
-```
-Server starting on :8080...
-```
-
-Two accounts are seeded for convenience:
+If `DATABASE_URL` is **not** set, the server uses the in-memory event store. Two demo accounts are seeded on first startup:
 
 | ID   | Balance |
 | ---- | ------- |
 | acc1 | 100.0   |
 | acc2 | 50.0    |
+
+## Run — Postgres
+
+A `docker-compose.yml` is included for local development.
+
+```bash
+# 1. Start Postgres (healthcheck-gated).
+make up
+
+# 2. Apply migrations.
+make migrate
+
+# 3. Run the server with DATABASE_URL pointing at the container.
+make run
+```
+
+`make run` is equivalent to:
+
+```bash
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' \
+  go run ./cmd/server
+```
+
+When `DATABASE_URL` is set, the server constructs `eventstore.PostgresStore` instead of the in-memory one. The choice lives at the wiring layer in `cmd/server/main.go`; the service layer is store-agnostic.
+
+### Useful Make targets
+
+| Target           | What it does                                       |
+| ---------------- | -------------------------------------------------- |
+| `make up`        | Start the Postgres container.                      |
+| `make down`      | Stop and remove the container.                     |
+| `make migrate`   | Apply all up migrations via the `migrate` CLI.     |
+| `make migrate-down` | Roll back the most recent migration.            |
+| `make build`     | `go build ./...`                                   |
+| `make vet`       | `go vet ./...`                                     |
+| `make test`      | `go test ./...`                                    |
+| `make run`       | Run the server with `DATABASE_URL` set.            |
+
+### Schema
+
+The Postgres store uses a single table (see `migrations/0001_init.up.sql`):
+
+```sql
+CREATE TABLE events (
+    aggregate_id  TEXT         NOT NULL,
+    sequence      BIGINT       NOT NULL,
+    event_type    TEXT         NOT NULL,
+    payload       JSONB        NOT NULL,
+    occurred_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (aggregate_id, sequence)
+);
+```
+
+- `(aggregate_id, sequence)` is the primary key — it gives both fast per-aggregate reads and free optimistic-concurrency on insert.
+- The payload column is JSONB; the Go side decodes it back into the right concrete event struct based on `event_type`.
 
 ## API
 
@@ -93,10 +159,10 @@ Transfer funds from one account to another.
 
 ```json
 {
-  "InitialSourceAccount":      { ... },
-  "InitialDestinationAccount": { ... },
-  "FinalSourceAccount":        { ... },
-  "FinalDestinationAccount":   { ... },
+  "InitialSourceAccount":      { "ID": "acc1", "Balance": 100.0 },
+  "InitialDestinationAccount": { "ID": "acc2", "Balance": 50.0  },
+  "FinalSourceAccount":        { "ID": "acc1", "Balance": 75.0  },
+  "FinalDestinationAccount":   { "ID": "acc2", "Balance": 75.0  },
   "TransferAmount":            10.0,
   "FeeAmount":                 0.0
 }
@@ -109,6 +175,7 @@ On error the server currently returns `500 Internal Server Error` with the error
 | `ErrInvalidTransferAmount`  | `amount` is below the minimum (1.0).                   |
 | `ErrOutOfService`           | The `TimeService` reports the service is unavailable.  |
 | `ErrAccountNotFound`        | Source or destination account does not exist.          |
+| `ErrConcurrencyConflict`    | Another writer appended to the same aggregate concurrently. |
 | `InsufficientFundsError`    | Source account balance is below `amount` (+ fee).      |
 
 > Note: all of the above currently surface as `500`. Mapping them to appropriate `4xx` status codes is a sensible next step.
@@ -129,42 +196,67 @@ curl -s -X POST http://localhost:8080/transfer \
                     └────────────────────┘                        │
                                                                  ▼
    ┌────────────┐    ┌─────────────────────┐    ┌──────────────────────────┐
-   │  HTTP /    │──▶ │ TransferService     │──▶ │ AccountRepository        │
-   │  gorilla   │    │  (internal/service) │    │  (in-memory, mutex map)  │
-   └────────────┘    └──────────┬──────────┘    └──────────────────────────┘
-                                │
-                ┌───────────────┼────────────────┐
-                ▼               ▼                ▼
-        ┌──────────────┐ ┌──────────────┐ ┌──────────────────────┐
-        │ FeePolicy    │ │ TimeService  │ │ EventBus callback    │
-        │ (policy pkg) │ │ (policy pkg) │ │ → TransferCompleted  │
-        └──────────────┘ └──────────────┘ └──────────────────────┘
+   │  HTTP /    │──▶ │ TransferService     │──▶ │ eventstore.Store         │
+   │  gorilla   │    │  (internal/service) │    │  ┌─────────────────────┐ │
+   └────────────┘    └──────────┬──────────┘    │  │ MemoryStore (default)│ │
+                                │               │  │ PostgresStore (DSN)  │ │
+                ┌───────────────┼────────────────┤  └─────────────────────┘ │
+                ▼               ▼                ▼                          │
+        ┌──────────────┐ ┌──────────────┐ ┌──────────────────────┐           │
+        │ FeePolicy    │ │ TimeService  │ │ EventBus callback    │           │
+        │ (policy pkg) │ │ (policy pkg) │ │ → TransferCompleted  │           │
+        └──────────────┘ └──────────────┘ └──────────────────────┘           │
+                                                       │                     │
+                                                       ▼                     │
+                                              ┌──────────────────────┐       │
+                                              │ MemoryAccountRepo    │◀──────┘
+                                              │  (replays events)    │
+                                              └──────────────────────┘
 ```
 
 ### Dependency direction
 
 All dependencies point inward toward `internal/domain`:
 
-- `domain` defines the interfaces (`AccountRepository`, `FeePolicy`, `TimeService`, `TransferService`) and the entity (`Account`).
-- `service` depends on `domain`.
+- `domain` defines the interfaces (`AccountRepository`, `FeePolicy`, `TimeService`, `TransferService`) and the entities (`Account`, `Event`).
+- `service` depends on `domain` and the `eventstore.Store` interface.
+- `eventstore` (memory + Postgres) depends on `domain`.
 - `repository`, `policy`, and `eventbus` depend on `domain`.
 - `cmd/server` depends on everything to wire the graph.
 
-This keeps the domain free of infrastructure concerns and trivially testable.
+This keeps the domain free of infrastructure concerns and lets the store be swapped without service-layer changes.
 
 ### Transfer flow
 
 1. Validate `amount ≥ 1.0` (otherwise `ErrInvalidTransferAmount`).
 2. Check `timeService.IsServiceAvailable(time.Now())` (otherwise `ErrOutOfService`).
-3. Load source and destination accounts via `AccountRepository.FindByID`.
-4. Compute fee with `FeePolicy.CalculateFee(amount)`; debit the fee from the source if non-zero.
-5. `Debit(amount)` from source — fails with `InsufficientFundsError` if balance is too low.
-6. `Credit(amount)` to destination.
-7. Persist both balances via `UpdateBalance`.
-8. Publish a `TransferCompletedEvent` through the event-bus callback.
-9. Return a `TransferReceipt`.
+3. Load both aggregates' event streams via `eventStore.Load`.
+4. Replay each into an `Account` via `domain.ReplayAccount` to derive current state.
+5. Compute fee with `FeePolicy.CalculateFee(amount)`; check `source.balance ≥ amount + fee` (otherwise `InsufficientFundsError`).
+6. Append `MoneyDebited` events for fee (if any) and amount to the source's stream.
+7. Append a `MoneyCredited` event for the amount to the destination's stream.
+8. Publish a `TransferCompletedEvent` via the EventBus callback (integration event).
+9. Return a `TransferReceipt` with distinct initial/final snapshots.
 
-### Pluggable policies
+Optimistic concurrency is enforced by the store: an append with a stale `expectedVersion` returns `ErrConcurrencyConflict`. The service does not currently retry; surfacing the error to the caller is the simplest correct behavior at this stage.
+
+### Event types
+
+Stored events (per-account, used to rebuild state):
+
+| Type             | Trigger                                |
+| ---------------- | -------------------------------------- |
+| `AccountOpened`  | Seeding an account with initial balance. |
+| `MoneyDebited`   | Source-side debit (fee and/or amount). |
+| `MoneyCredited`  | Destination-side credit.               |
+
+Integration event (publish-only, not stored):
+
+| Type                       | Trigger                                |
+| -------------------------- | -------------------------------------- |
+| `TransferCompletedEvent`   | Successful end of a transfer.          |
+
+## Pluggable policies
 
 `internal/policy/policies.go` ships three `FeePolicy` implementations:
 
@@ -176,7 +268,7 @@ This keeps the domain free of infrastructure concerns and trivially testable.
 
 The `TimeService` is provided by `DefaultTimeService`, a simple boolean-flag implementation — useful for tests that need to simulate "service is closed."
 
-### Event bus
+## Event bus
 
 `internal/eventbus/event_bus.go` is an in-process pub/sub:
 
@@ -187,24 +279,19 @@ Handlers are fire-and-forget; there is no panic recovery or backpressure.
 
 ## Known Limitations
 
-These are honest observations from a careful read of the code; nothing here has been changed.
-
-- **Race on `Account.Balance`**: `Debit` and `Credit` mutate the struct with no lock. The repository's `RWMutex` only protects the map, not the `*Account` pointers it stores. Concurrent transfers to the same account are data races.
-- **Persistence errors are swallowed**: `UpdateBalance` return values are discarded (`_ =`). A failed write is invisible to the caller.
-- **Coarse HTTP error mapping**: every service error maps to `500`. `ErrAccountNotFound` should be `404`, `ErrInvalidTransferAmount` `400`, `InsufficientFundsError` `422`, etc.
-- **Receipt snapshot is shallow**: `InitialSourceAccount` and `FinalSourceAccount` point to the same mutated `*Account`; the "before" state is effectively the post-debit state.
-- **Goroutine handlers**: event-bus subscribers run via `go handler(event)` with no panic recovery — a panicking subscriber crashes the process.
-- **In-memory state**: accounts are lost when the process restarts. There is no persistence layer.
+- **No optimistic-concurrency retry** — `ErrConcurrencyConflict` is returned to the caller. A production version would retry on conflict.
+- **Coarse HTTP error mapping** — every service error currently maps to `500`. Domain errors should map to `4xx`.
+- **Goroutine handlers** — event-bus subscribers run via `go handler(event)` with no panic recovery; a panicking subscriber crashes the process.
+- **No event upcasting or schema versioning** — old payloads must remain readable forever. Practical for now, but will need a versioning strategy as events evolve.
 
 ## Possible Next Steps
 
-- Fix the data race on `Account` (e.g., per-account mutex, or store balances atomically).
+- Retry on `ErrConcurrencyConflict` in `TransferService` with bounded attempts.
 - Map domain errors to proper HTTP status codes.
-- Snapshot account balances into `TransferReceipt` instead of sharing pointers.
 - Add a panic-recovery wrapper around event-bus subscribers.
-- Introduce a persistent repository (e.g., PostgreSQL or SQLite).
-- Add unit tests for `TransferService` against an in-memory fake repo and a fake `FeePolicy` / `TimeService`.
-- Add integration tests using `httptest`.
+- Add a second projection (e.g., per-account transaction history).
+- Snapshots for replay performance once event streams grow long.
+- Integration tests against a real Postgres (the `migrate` CLI + a `t.Cleanup`-style teardown would make this easy).
 
 ## License
 
