@@ -22,10 +22,11 @@ The HTTP entry point wires all of these together and serves a single `POST /tran
 ├── go.mod
 ├── go.sum
 ├── docker-compose.yml         # Local Postgres for development
-├── Makefile                   # up / down / migrate / run / test
+├── Makefile                   # up / down / migrate / run / test / web-dev
 ├── migrations/                # Plain SQL migrations for the `events` table
 │   ├── 0001_init.up.sql
 │   └── 0001_init.down.sql
+├── web/                       # Next.js (TS) dashboard (see web/ section below)
 ├── cmd/
 │   └── server/
 │       └── main.go            # Entry point: wires dependencies, starts HTTP server
@@ -47,13 +48,23 @@ The HTTP entry point wires all of these together and serves a single `POST /tran
         ├── store.go           # Store interface + ErrConcurrencyConflict
         ├── memory_store.go    # In-memory append-only log
         └── postgres_store.go  # Postgres-backed append-only log (pgx/v5)
+
+web/                           # Next.js (TS) browser dashboard
+├── components/
+│   ├── accounts-table.tsx     # Account list with balances
+│   ├── event-log.tsx          # Per-aggregate event stream table
+│   └── transfer-form.tsx      # Money-transfer form
+└── lib/
+    ├── api.ts                 # Typed client for the Go backend
+    ├── format.ts              # Money / date formatting helpers
+    └── types.ts               # Shared TS types matching the Go wire format
 ```
 
 ## Requirements
 
 - Go **1.27.0** or newer (per `go.mod`).
 - Module path: `go-odtbank`.
-- For the Postgres path: a running Postgres instance reachable via `DATABASE_URL`, plus the [`migrate`](https://github.com/golang-migrate/migrate) CLI for applying migrations.
+- For the Postgres path: a running Postgres instance reachable via `DATABASE_URL`. Migrations are applied via Docker (no local CLI needed).
 
 ## Dependencies
 
@@ -86,24 +97,54 @@ If `DATABASE_URL` is **not** set, the server uses the in-memory event store. Two
 
 ## Run — Postgres
 
-A `docker-compose.yml` is included for local development.
+A `docker-compose.yml` is included for local development with two services:
+
+- **postgres** — `postgres:16-alpine` (database `odtbank`, user/password
+  `postgres`/`postgres`) on port **5432**, with a named volume
+  (`postgres-data`) so data survives restarts, and a `pg_isready` healthcheck.
+- **migrate** — the [`migrate/migrate`](https://hub.docker.com/r/migrate/migrate) image,
+  wired to `postgres` by service name so it can reach the database. It's
+  grouped under the `tools` profile so it never starts with a plain
+  `docker compose up`; you invoke it on demand for one-off migrations.
+
+> No local [`migrate`](https://github.com/golang-migrate/migrate) CLI is
+> required — the Docker image handles it.
+
+### Using `docker compose` directly
 
 ```bash
-# 1. Start Postgres (healthcheck-gated).
-make up
+# 1. Start the Postgres container in the background.
+docker compose up -d postgres
 
-# 2. Apply migrations.
-make migrate
+# 2. Wait until it reports healthy.
+docker compose ps postgres
 
-# 3. Run the server with DATABASE_URL pointing at the container.
-make run
+# 3. Apply migrations (runs the `migrate/migrate` image once, then exits).
+docker compose run --rm migrate up
+
+# 4. Run the server with DATABASE_URL pointing at the container.
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' go run ./cmd/server
+
+# 5. Roll back the most recent migration (optional).
+docker compose run --rm migrate down 1
+
+# 6. Stop and remove the containers (data is kept in the volume).
+docker compose down
+
+# Or remove the containers *and* the data volume.
+docker compose down -v
 ```
 
-`make run` is equivalent to:
+### Using the Makefile
+
+`make` wraps the same steps (see the target table below):
 
 ```bash
-DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' \
-  go run ./cmd/server
+make up           # docker compose up -d postgres
+make migrate      # run the migrate image: up
+make migrate-down # run the migrate image: down 1
+make run          # run the server with DATABASE_URL set
+make down         # docker compose down
 ```
 
 When `DATABASE_URL` is set, the server constructs `eventstore.PostgresStore` instead of the in-memory one. The choice lives at the wiring layer in `cmd/server/main.go`; the service layer is store-agnostic.
@@ -168,17 +209,60 @@ Transfer funds from one account to another.
 }
 ```
 
-On error the server currently returns `500 Internal Server Error` with the error message. The service distinguishes:
+On error the server returns a JSON body `{"error": "..."}` with a meaningful status code:
 
-| Error                       | Meaning                                                |
-| --------------------------- | ------------------------------------------------------ |
-| `ErrInvalidTransferAmount`  | `amount` is below the minimum (1.0).                   |
-| `ErrOutOfService`           | The `TimeService` reports the service is unavailable.  |
-| `ErrAccountNotFound`        | Source or destination account does not exist.          |
-| `ErrConcurrencyConflict`    | Another writer appended to the same aggregate concurrently. |
-| `InsufficientFundsError`    | Source account balance is below `amount` (+ fee).      |
+| Error                       | Meaning                                                | Status |
+| --------------------------- | ------------------------------------------------------ | ------ |
+| `ErrInvalidTransferAmount`  | `amount` is below the minimum (1.0).                   | 400    |
+| `ErrOutOfService`           | The `TimeService` reports the service is unavailable.  | 503    |
+| `ErrAccountNotFound`        | Source or destination account does not exist.          | 404    |
+| `ErrConcurrencyConflict`    | Another writer appended to the same aggregate concurrently. | 409 |
+| `InsufficientFundsError`    | Source account balance is below `amount` (+ fee).      | 422    |
 
-> Note: all of the above currently surface as `500`. Mapping them to appropriate `4xx` status codes is a sensible next step.
+### `GET /accounts`
+
+List all seeded accounts with their replayed balances.
+
+**Response** (`200 OK`, `application/json`):
+
+```json
+{
+  "accounts": [
+    { "id": "acc1", "balance": 90.0, "event_count": 2 },
+    { "id": "acc2", "balance": 60.0, "event_count": 2 }
+  ]
+}
+```
+
+### `GET /accounts/{id}/events`
+
+The full event stream for one aggregate (the event-sourced source of truth).
+
+**Response** (`200 OK`, `application/json`):
+
+```json
+{
+  "aggregate_id": "acc1",
+  "events": [
+    { "seq": 0, "type": "AccountOpened", "amount": 100.0, "occurred_at": "2026-08-23T06:25:51Z" },
+    { "seq": 1, "type": "MoneyDebited",  "amount": 10.0,  "occurred_at": "2026-08-23T06:25:52Z" }
+  ]
+}
+```
+
+## Web interface
+
+A Next.js (TypeScript) dashboard lives in `web/`. It reads accounts, shows each account's event log, and submits transfers. The backend exposes the endpoints above and permissive CORS so the browser app can reach it directly.
+
+```bash
+# Terminal 1 — backend
+go run ./cmd/server          # or: make run
+
+# Terminal 2 — frontend (http://localhost:3000)
+cd web && npm install && npm run dev
+```
+
+The UI calls `http://localhost:8080` by default; set `NEXT_PUBLIC_API_URL` to point elsewhere.
 
 ### Example
 
@@ -280,14 +364,12 @@ Handlers are fire-and-forget; there is no panic recovery or backpressure.
 ## Known Limitations
 
 - **No optimistic-concurrency retry** — `ErrConcurrencyConflict` is returned to the caller. A production version would retry on conflict.
-- **Coarse HTTP error mapping** — every service error currently maps to `500`. Domain errors should map to `4xx`.
 - **Goroutine handlers** — event-bus subscribers run via `go handler(event)` with no panic recovery; a panicking subscriber crashes the process.
 - **No event upcasting or schema versioning** — old payloads must remain readable forever. Practical for now, but will need a versioning strategy as events evolve.
 
 ## Possible Next Steps
 
 - Retry on `ErrConcurrencyConflict` in `TransferService` with bounded attempts.
-- Map domain errors to proper HTTP status codes.
 - Add a panic-recovery wrapper around event-bus subscribers.
 - Add a second projection (e.g., per-account transaction history).
 - Snapshots for replay performance once event streams grow long.

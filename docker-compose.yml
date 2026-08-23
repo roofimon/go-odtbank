@@ -16,5 +16,15 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    image: migrate/migrate
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations
+    entrypoint: ["migrate", "-path", "/migrations", "-database", "postgres://postgres:postgres@postgres:5432/odtbank?sslmode=disable"]
+
 volumes:
   postgres-data:
