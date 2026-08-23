@@ -1,6 +1,6 @@
 DSN ?= postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable
 
-.PHONY: up down migrate migrate-down run test build vet
+.PHONY: up down migrate migrate-down run test build vet web-dev web-test
 
 up:
 	docker compose up -d postgres
@@ -9,19 +9,25 @@ down:
 	docker compose down
 
 migrate:
-	migrate -path migrations -database "$(DSN)" up
+	docker compose run --rm migrate up
 
 migrate-down:
-	migrate -path migrations -database "$(DSN)" down 1
+	docker compose run --rm migrate down 1
 
 build:
-	go build ./...
+	go build ./cmd/... ./internal/...
 
 vet:
-	go vet ./...
+	go vet ./cmd/... ./internal/...
 
 test:
-	go test ./...
+	go test ./cmd/... ./internal/...
 
 run:
 	DATABASE_URL=$(DSN) go run ./cmd/server
+
+web-dev:
+	cd web && npm run dev
+
+web-test:
+	cd web && npm run build
