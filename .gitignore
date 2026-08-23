@@ -1,0 +1,40 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.dylib
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go test/coverage profiles
+*.cover
+*.cgo
+*.cgo1.go
+*.cgo2.go
+
+# Build artifacts
+bin/
+dist/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.local
