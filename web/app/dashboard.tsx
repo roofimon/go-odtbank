@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { AccountsTable } from "../components/accounts-table";
 import { EventLog } from "../components/event-log";
+import { DepositForm } from "../components/deposit-form";
 import { TransferForm } from "../components/transfer-form";
 import { getAccounts, getEvents } from "../lib/api";
 import type { Account, EventLogResponse } from "../lib/types";
@@ -95,11 +96,12 @@ export default function Dashboard({
         </div>
       )}
 
-      <section aria-label="Transfer" className="mb-6">
-        <TransferForm
-          accounts={accounts}
-          onCompleted={() => refresh(selectedId)}
-        />
+      <section
+        aria-label="Account operations"
+        className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2"
+      >
+        <TransferForm accounts={accounts} onCompleted={() => refresh(selectedId)} />
+        <DepositForm accounts={accounts} onCompleted={(id) => refresh(id)} />
       </section>
 
       <section

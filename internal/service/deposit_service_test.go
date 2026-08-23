@@ -1,0 +1,89 @@
+package service_test
+
+import (
+	"errors"
+	"math"
+	"testing"
+	"time"
+
+	"go-odtbank/internal/domain"
+	"go-odtbank/internal/eventstore"
+	"go-odtbank/internal/service"
+)
+
+func seededDepositStore(t *testing.T) *eventstore.MemoryStore {
+	t.Helper()
+	store := eventstore.NewMemoryStore()
+	err := store.Append(domain.AccountOpened{
+		Aggregate: "acc1", Type: "AccountOpened", Seq: 0,
+		Occurred: time.Now(), ID: "acc1", InitialBalance: 100,
+	}, 0)
+	if err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	return store
+}
+
+func TestDeposit_AppendsCreditAndReturnsReceipt(t *testing.T) {
+	for _, amount := range []float64{10, 25.50} {
+		t.Run("amount", func(t *testing.T) {
+			store := seededDepositStore(t)
+			svc := service.NewDepositService(store)
+
+			receipt, err := svc.Deposit(amount, "acc1")
+			if err != nil {
+				t.Fatalf("Deposit: %v", err)
+			}
+			if receipt.InitialAccount.Balance != 100 || receipt.FinalAccount.Balance != 100+amount {
+				t.Fatalf("unexpected receipt: %+v", receipt)
+			}
+
+			events, err := store.Load("acc1")
+			if err != nil {
+				t.Fatalf("load events: %v", err)
+			}
+			if len(events) != 2 || events[1].Version() != 1 {
+				t.Fatalf("events = %+v, want credit at sequence 1", events)
+			}
+			credit, ok := events[1].(domain.MoneyCredited)
+			if !ok || credit.Amount != amount {
+				t.Fatalf("event = %#v, want MoneyCredited(%v)", events[1], amount)
+			}
+		})
+	}
+}
+
+func TestDeposit_RejectsInvalidAmountsWithoutAppending(t *testing.T) {
+	for _, amount := range []float64{-1, 0, 9.99, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		store := seededDepositStore(t)
+		svc := service.NewDepositService(store)
+		if _, err := svc.Deposit(amount, "acc1"); !errors.Is(err, domain.ErrInvalidDepositAmount) {
+			t.Errorf("Deposit(%v) error = %v, want ErrInvalidDepositAmount", amount, err)
+		}
+		events, _ := store.Load("acc1")
+		if len(events) != 1 {
+			t.Errorf("Deposit(%v) appended an event", amount)
+		}
+	}
+}
+
+func TestDeposit_AccountNotFound(t *testing.T) {
+	svc := service.NewDepositService(eventstore.NewMemoryStore())
+	if _, err := svc.Deposit(10, "missing"); !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("error = %v, want ErrAccountNotFound", err)
+	}
+}
+
+type conflictingStore struct{ *eventstore.MemoryStore }
+
+func (s conflictingStore) Append(domain.Event, int) error {
+	return eventstore.ErrConcurrencyConflict
+}
+
+func TestDeposit_PropagatesConcurrencyConflict(t *testing.T) {
+	store := seededDepositStore(t)
+	svc := service.NewDepositService(conflictingStore{store})
+	if _, err := svc.Deposit(10, "acc1"); !errors.Is(err, eventstore.ErrConcurrencyConflict) {
+		t.Fatalf("error = %v, want ErrConcurrencyConflict", err)
+	}
+}

@@ -1,6 +1,7 @@
 import type {
   Account,
   AccountsWithMeta,
+  DepositReceipt,
   EventLogResponse,
   TransferReceipt,
 } from "./types";
@@ -69,5 +70,16 @@ export function transfer(
       source_account_id: sourceAccountId,
       destination_account_id: destinationAccountId,
     }),
+  );
+}
+
+export function deposit(
+  amount: number,
+  accountId: string,
+): Promise<DepositReceipt> {
+  return request<DepositReceipt>(
+    "/deposit",
+    { method: "POST" },
+    JSON.stringify({ amount, account_id: accountId }),
   );
 }

@@ -28,6 +28,11 @@ type TransferRequest struct {
 	DestID   string  `json:"destination_account_id"`
 }
 
+type DepositRequest struct {
+	Amount    float64 `json:"amount"`
+	AccountID string  `json:"account_id"`
+}
+
 func main() {
 	// 1. Initialize infrastructure
 	store, err := openStore(context.Background())
@@ -53,6 +58,7 @@ func main() {
 	}
 
 	transferService := service.NewTransferService(store, feePolicy, timeService, eventBusFunc)
+	depositService := service.NewDepositService(store)
 
 	// 3. Setup router
 	r := mux.NewRouter()
@@ -89,6 +95,7 @@ func main() {
 
 		writeJSON(w, http.StatusOK, receipt)
 	}).Methods("POST")
+	r.HandleFunc("/deposit", handleDeposit(depositService)).Methods("POST")
 
 	r.HandleFunc("/accounts", func(w http.ResponseWriter, r *http.Request) {
 		accounts, err := listAccounts(store)
@@ -124,6 +131,23 @@ func main() {
 
 	fmt.Println("Server starting on :8080...")
 	log.Fatal(srv.ListenAndServe())
+}
+
+func handleDeposit(depositService domain.DepositService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req DepositRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		receipt, err := depositService.Deposit(req.Amount, req.AccountID)
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, receipt)
+	}
 }
 
 // openStore picks the implementation based on whether DATABASE_URL is set.
@@ -186,6 +210,8 @@ func firstNonEmpty(values ...string) string {
 func statusForError(err error) int {
 	switch {
 	case errors.Is(err, domain.ErrInvalidTransferAmount):
+		return http.StatusBadRequest
+	case errors.Is(err, domain.ErrInvalidDepositAmount):
 		return http.StatusBadRequest
 	case errors.Is(err, domain.ErrOutOfService):
 		return http.StatusServiceUnavailable

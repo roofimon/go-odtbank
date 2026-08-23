@@ -1,6 +1,6 @@
 # go-odtbank
 
-A small Go HTTP service that exposes a single money-transfer endpoint. The account ledger is **event-sourced**: account state is derived from an append-only event log, not mutated in place. Two interchangeable store implementations ship — in-memory and Postgres.
+A small Go HTTP service that supports money transfers and account deposits. The account ledger is **event-sourced**: account state is derived from an append-only event log, not mutated in place. Two interchangeable store implementations ship — in-memory and Postgres.
 
 ## Overview
 
@@ -13,7 +13,7 @@ A small Go HTTP service that exposes a single money-transfer endpoint. The accou
 - **Policy** encapsulates fee calculation and service-availability rules.
 - **Event bus** publishes a `TransferCompletedEvent` after each successful transfer (the integration event, distinct from the per-account stored events).
 
-The HTTP entry point wires all of these together and serves a single `POST /transfer` route.
+The HTTP entry point wires all of these together and serves transfer, deposit, account-list, and event-log routes.
 
 ## Project Layout
 
@@ -219,6 +219,31 @@ On error the server returns a JSON body `{"error": "..."}` with a meaningful sta
 | `ErrConcurrencyConflict`    | Another writer appended to the same aggregate concurrently. | 409 |
 | `InsufficientFundsError`    | Source account balance is below `amount` (+ fee).      | 422    |
 
+### `POST /deposit`
+
+Deposit at least `10.00` into an existing account.
+
+**Request body** (`application/json`):
+
+```json
+{
+  "account_id": "acc1",
+  "amount": 10.0
+}
+```
+
+**Successful response** (`200 OK`, `application/json`):
+
+```json
+{
+  "InitialAccount": { "ID": "acc1", "Balance": 100.0 },
+  "FinalAccount": { "ID": "acc1", "Balance": 110.0 },
+  "DepositAmount": 10.0
+}
+```
+
+Amounts below `10.00` or non-finite amounts return `400`, unknown accounts return `404`, and optimistic-concurrency conflicts return `409`.
+
 ### `GET /accounts`
 
 List all seeded accounts with their replayed balances.
@@ -252,7 +277,7 @@ The full event stream for one aggregate (the event-sourced source of truth).
 
 ## Web interface
 
-A Next.js (TypeScript) dashboard lives in `web/`. It reads accounts, shows each account's event log, and submits transfers. The backend exposes the endpoints above and permissive CORS so the browser app can reach it directly.
+A Next.js (TypeScript) dashboard lives in `web/`. It reads accounts, shows each account's event log, and submits transfers and deposits. The backend exposes the endpoints above and permissive CORS so the browser app can reach it directly.
 
 ```bash
 # Terminal 1 — backend
@@ -270,6 +295,10 @@ The UI calls `http://localhost:8080` by default; set `NEXT_PUBLIC_API_URL` to po
 curl -s -X POST http://localhost:8080/transfer \
   -H 'Content-Type: application/json' \
   -d '{"amount": 25.0, "source_account_id": "acc1", "destination_account_id": "acc2"}'
+
+curl -s -X POST http://localhost:8080/deposit \
+  -H 'Content-Type: application/json' \
+  -d '{"amount": 10.0, "account_id": "acc1"}'
 ```
 
 ## Architecture
@@ -332,7 +361,7 @@ Stored events (per-account, used to rebuild state):
 | ---------------- | -------------------------------------- |
 | `AccountOpened`  | Seeding an account with initial balance. |
 | `MoneyDebited`   | Source-side debit (fee and/or amount). |
-| `MoneyCredited`  | Destination-side credit.               |
+| `MoneyCredited`  | Destination-side transfer credit or account deposit. |
 
 Integration event (publish-only, not stored):
 
