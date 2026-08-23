@@ -19,6 +19,10 @@ type Store interface {
 	// Load returns every event recorded for the given aggregate, in append
 	// order. An aggregate with no events yields an empty slice.
 	Load(aggregateID string) ([]domain.Event, error)
+
+	// ListAggregates returns the IDs of all aggregates that have at least one
+	// event, sorted ascending.
+	ListAggregates() ([]string, error)
 }
 
 var ErrConcurrencyConflict = errors.New("event store: concurrency conflict on append")

@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"sort"
 	"sync"
 
 	"go-odtbank/internal/domain"
@@ -44,5 +45,19 @@ func (m *MemoryStore) Load(aggregateID string) ([]domain.Event, error) {
 	src := m.streams[aggregateID]
 	out := make([]domain.Event, len(src))
 	copy(out, src)
+	return out, nil
+}
+
+// ListAggregates returns the IDs of all aggregates that have at least one
+// event, sorted ascending.
+func (m *MemoryStore) ListAggregates() ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]string, 0, len(m.streams))
+	for id := range m.streams {
+		out = append(out, id)
+	}
+	sort.Strings(out)
 	return out, nil
 }

@@ -96,6 +96,35 @@ func (s *PostgresStore) Load(aggregateID string) ([]domain.Event, error) {
 	return out, nil
 }
 
+// ListAggregates returns distinct aggregate IDs, sorted ascending.
+func (s *PostgresStore) ListAggregates() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT aggregate_id
+		FROM events
+		ORDER BY aggregate_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("eventstore: list aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("eventstore: scan aggregate: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("eventstore: iterate aggregates: %w", err)
+	}
+	return out, nil
+}
+
 // decodeEvent materializes the stored payload into the correct concrete type
 // based on event_type. JSON field names match the struct field names.
 func decodeEvent(aggregateID, eventType string, payload []byte) (domain.Event, error) {
