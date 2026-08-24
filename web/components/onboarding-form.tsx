@@ -3,7 +3,6 @@
 import { FormEvent, useState, type InputHTMLAttributes } from "react";
 import { useRouter } from "next/navigation";
 import { onboardCustomer } from "../lib/api";
-import { formatMoney } from "../lib/format";
 import type { OnboardingReceipt, OnboardingRequest } from "../lib/types";
 
 const initialForm: OnboardingRequest = {
@@ -83,12 +82,9 @@ export function OnboardingForm() {
     return (
       <div className="rounded-xl border border-positive/30 bg-surface p-6">
         <div className="mb-4 grid size-11 place-items-center rounded-full bg-positive-soft text-xl text-positive">✓</div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-positive">KYC verified</p>
-        <h2 className="mt-1 text-xl font-semibold text-text">Account ready</h2>
-        <dl className="mt-5 grid gap-4 rounded-lg bg-surface-2 p-4 text-sm sm:grid-cols-2">
-          <div><dt className="text-text-muted">Account ID</dt><dd className="mt-1 break-all font-mono text-text">{receipt.account_id}</dd></div>
-          <div><dt className="text-text-muted">Opening balance</dt><dd className="mt-1 font-mono text-text">{formatMoney(receipt.balance)}</dd></div>
-        </dl>
+        <p className="text-xs font-semibold uppercase tracking-wide text-positive">Application submitted</p>
+        <h2 className="mt-1 text-xl font-semibold text-text">Waiting for approval</h2>
+        <p className="mt-3 text-sm text-text-2">An administrator will review your information and passport. Log in to check your application status.</p>
         <button type="button" onClick={() => router.push(`/login?email=${encodeURIComponent(form.email)}`)} className="mt-5 rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white hover:bg-brand-hover">
           Continue to login
         </button>
@@ -116,7 +112,7 @@ export function OnboardingForm() {
         {step < 3 ? (
           <button type="button" onClick={() => continueTo(step + 1)} className="rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white hover:bg-brand-hover">Continue</button>
         ) : (
-          <button type="submit" disabled={loading} className="rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white hover:bg-brand-hover disabled:opacity-40">{loading ? "Creating account…" : "Create account"}</button>
+          <button type="submit" disabled={loading} className="rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white hover:bg-brand-hover disabled:opacity-40">{loading ? "Submitting…" : "Submit application"}</button>
         )}
       </div>
     </form>

@@ -26,22 +26,18 @@ func validOnboardingCommand() domain.OnboardingCommand {
 	}
 }
 
-func TestOnboarding_CreatesCustomerAndFundedAccount(t *testing.T) {
+func TestOnboarding_CreatesWaitingApplicationWithoutAccount(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	receipt, err := service.NewOnboardingService(store).Onboard(validOnboardingCommand())
 	if err != nil {
 		t.Fatalf("Onboard: %v", err)
 	}
-	if receipt.CustomerID == "" || receipt.AccountID == "" || receipt.KYCStatus != "verified" || receipt.Balance != 25 {
+	if receipt.CustomerID == "" || receipt.KYCStatus != domain.KYCWaiting {
 		t.Fatalf("receipt = %+v", receipt)
 	}
-	events, err := store.Load(receipt.AccountID)
-	if err != nil || len(events) != 1 {
-		t.Fatalf("events = %+v, err = %v", events, err)
-	}
-	account := domain.ReplayAccount(receipt.AccountID, events)
-	if account.Balance != 25 {
-		t.Fatalf("balance = %v, want 25", account.Balance)
+	ids, _ := store.ListAggregates()
+	if len(ids) != 0 {
+		t.Fatalf("aggregates = %v, want none", ids)
 	}
 }
 
@@ -49,7 +45,7 @@ func TestOnboarding_AllowsZeroInitialDeposit(t *testing.T) {
 	command := validOnboardingCommand()
 	command.InitialDeposit = 0
 	receipt, err := service.NewOnboardingService(eventstore.NewMemoryStore()).Onboard(command)
-	if err != nil || receipt.Balance != 0 {
+	if err != nil || receipt.KYCStatus != domain.KYCWaiting {
 		t.Fatalf("receipt = %+v, err = %v", receipt, err)
 	}
 }
@@ -97,14 +93,14 @@ func TestOnboarding_RejectsDuplicateDocumentWithoutAccount(t *testing.T) {
 		t.Fatalf("receipt = %+v, err = %v", receipt, err)
 	}
 	ids, _ := store.ListAggregates()
-	if len(ids) != 1 {
-		t.Fatalf("aggregate count = %d, want 1", len(ids))
+	if len(ids) != 0 {
+		t.Fatalf("aggregate count = %d, want 0", len(ids))
 	}
 }
 
 type failingOnboardingStore struct{ err error }
 
-func (s failingOnboardingStore) CreateCustomerAccount(domain.Customer, domain.AccountOpened) error {
+func (s failingOnboardingStore) CreateCustomerApplication(domain.Customer) error {
 	return s.err
 }
 

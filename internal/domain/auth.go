@@ -8,18 +8,26 @@ import (
 type Session struct {
 	TokenHash  string
 	CustomerID string
-	AccountID  string
+	AdminID    string
 	ExpiresAt  time.Time
 }
 
 type Principal struct {
-	CustomerID string `json:"customer_id"`
-	AccountID  string `json:"account_id"`
-	Email      string `json:"email"`
+	CustomerID      string `json:"customer_id,omitempty"`
+	AccountID       string `json:"account_id,omitempty"`
+	AdminID         string `json:"admin_id,omitempty"`
+	Email           string `json:"email"`
+	Role            string `json:"role"`
+	KYCStatus       string `json:"kyc_status,omitempty"`
+	RejectionReason string `json:"rejection_reason,omitempty"`
 }
+
+type Admin struct{ ID, Email, PasswordHash string }
 
 type AuthStore interface {
 	FindCustomerByEmail(email string) (*Customer, error)
+	FindAdminByEmail(email string) (*Admin, error)
+	UpsertAdmin(admin Admin) error
 	CreateSession(session Session) error
 	FindSession(tokenHash string, now time.Time) (*Principal, error)
 	DeleteSession(tokenHash string) error

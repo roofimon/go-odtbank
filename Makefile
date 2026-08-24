@@ -1,6 +1,6 @@
 DSN ?= postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable
 
-.PHONY: up down migrate migrate-down run test build vet web-dev web-test
+.PHONY: up down migrate migrate-down run admin test build vet web-dev web-test
 
 up:
 	docker compose up -d postgres
@@ -25,6 +25,9 @@ test:
 
 run:
 	DATABASE_URL=$(DSN) go run ./cmd/server
+
+admin:
+	DATABASE_URL=$(DSN) go run ./cmd/admin
 
 web-dev:
 	cd web && npm run dev

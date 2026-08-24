@@ -6,7 +6,8 @@ Account balances are not stored as mutable rows. Each balance is rebuilt by repl
 
 ## Features
 
-- Open an individual account through a public three-step KYC onboarding journey.
+- Submit an individual account application through a public three-step KYC onboarding journey.
+- Review and approve or reject applications in a protected admin area.
 - Log in with an email and password using an HTTP-only server-side session.
 - Transfer money between existing accounts (minimum `1.00`).
 - Deposit into an existing account (minimum `10.00`).
@@ -89,7 +90,13 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000/onboarding` to create an account, then log in at `http://localhost:3000/login`. Successful onboarding does not authenticate the customer. The protected dashboard displays Transfer, Deposit, Withdraw, or Transaction history.
+Open `http://localhost:3000/onboarding` to submit an application, then log in at `http://localhost:3000/login`. Customers see a waiting page until an administrator approves them. Approval creates the account and activates Transfer, Deposit, Withdraw, and Transaction history.
+
+For an in-memory demo, start the server with a development admin:
+
+```bash
+ADMIN_EMAIL='admin@example.com' ADMIN_PASSWORD='change-this-password' go run ./cmd/server
+```
 
 The browser calls `http://localhost:8080` by default. Override it when needed:
 
@@ -127,6 +134,16 @@ Equivalent Make targets:
 
 PostgreSQL persists data in the `postgres-data` Docker volume. Use `docker compose down -v` only when you also want to remove that data.
 
+Create or update a PostgreSQL admin after applying all migrations:
+
+```bash
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' \
+ADMIN_EMAIL='admin@example.com' ADMIN_PASSWORD='change-this-password' \
+go run ./cmd/admin
+```
+
+Log in with that identity and open `http://localhost:3000/admin` to review waiting applications and their passport images.
+
 ### Event schema
 
 All aggregates share one table:
@@ -156,7 +173,7 @@ Responses and non-onboarding request bodies use `application/json`. `/onboarding
 
 `POST /onboarding`
 
-Creates a verified demo customer and account. The customer must be at least 18. Initial funding may be omitted/zero or at least `10.00`.
+Creates a customer application with status `waiting_for_approval`. The customer must be at least 18. Requested initial funding may be omitted/zero or at least `10.00`; the account and opening event are created only when an admin approves the application.
 
 The request uses `multipart/form-data` with:
 
@@ -200,13 +217,11 @@ Successful onboarding returns `201`:
 ```json
 {
   "customer_id": "cus_...",
-  "account_id": "acc_...",
-  "kyc_status": "verified",
-  "balance": 25
+  "kyc_status": "waiting_for_approval"
 }
 ```
 
-The same normalized email or government document cannot be onboarded twice; duplicates return `409`. PostgreSQL requires migrations `0002_customers` and `0003_auth`. The passport image and password hash are stored privately and never included in account events or read APIs.
+The same normalized email or government document cannot be onboarded twice; duplicates return `409`. PostgreSQL requires migrations through `0004_review_workflow`. Passport images are available only to authenticated administrators and are never included in account events.
 
 ### Log in and out
 
@@ -218,7 +233,18 @@ curl -s -c cookies.txt http://localhost:8080/login \
   -d '{"email":"ada@example.com","password":"correct-horse-battery-staple"}'
 ```
 
-Use `-b cookies.txt` on protected requests. `GET /me` returns the current customer and account IDs. `POST /logout` invalidates the session and clears the cookie.
+Use `-b cookies.txt` on protected requests. `GET /me` returns the identity role and current onboarding status. Waiting or rejected customers cannot use banking endpoints; rejected customers receive the final review reason. `POST /logout` invalidates the session and clears the cookie.
+
+### Review applications
+
+Admin sessions can list `GET /admin/applications?status=waiting_for_approval`, inspect an application and its `/passport` resource, then use:
+
+```text
+POST /admin/applications/{customer_id}/approve
+POST /admin/applications/{customer_id}/reject  {"reason":"Passport image is unreadable"}
+```
+
+Approval creates and funds the account exactly once. Approval and rejection are terminal; subsequent review attempts return `409`.
 
 ### Transfer
 
@@ -357,7 +383,7 @@ npm run build
 
 ## Current limitations
 
-- KYC verification is simulated and immediately marked verified; there is no identity provider, sanctions screening, or manual review.
+- KYC decisions are manual demo decisions; there is no identity provider or sanctions screening.
 - Customer KYC is stored without application-level field encryption. Never submit real personal data to this demo.
 - Sessions have no rotation, device management, password reset, email verification, or rate limiting.
 - A transfer appends to two account streams without a transaction spanning both appends. A debit can therefore succeed before a destination credit fails.

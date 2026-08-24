@@ -17,8 +17,10 @@ func TestAuthenticationAndAccountAuthorizationEndToEnd(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	seedE2EAccount(t, store, "other-account", 999)
 	auth := service.NewAuthService(store)
+	hash, _ := service.HashPassword("admin-password-123")
+	_ = store.UpsertAdmin(domain.Admin{ID: "adm_1", Email: "admin@example.com", PasswordHash: hash})
 	server := httptest.NewServer(httpapi.NewRouter(httpapi.Dependencies{
-		Store: store, OnboardingService: service.NewOnboardingService(store), AuthService: auth,
+		Store: store, OnboardingService: service.NewOnboardingService(store), AuthService: auth, ReviewService: service.NewReviewService(store),
 	}))
 	t.Cleanup(server.Close)
 
@@ -46,13 +48,18 @@ func TestAuthenticationAndAccountAuthorizationEndToEnd(t *testing.T) {
 	loginResponse := postLogin(t, server, "ada@example.com", "correct-horse-battery-staple")
 	var principal domain.Principal
 	decodeResponse(t, loginResponse, http.StatusOK, &principal)
-	if principal.AccountID != onboarded.AccountID {
+	if principal.KYCStatus != domain.KYCWaiting || principal.AccountID != "" {
 		t.Fatalf("principal = %+v", principal)
 	}
 	cookies := loginResponse.Cookies()
 	if len(cookies) != 1 || !cookies[0].HttpOnly {
 		t.Fatalf("session cookie = %+v", cookies)
 	}
+	customerAdminRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/admin/applications", nil)
+	customerAdminRequest.AddCookie(cookies[0])
+	customerAdminResponse, _ := server.Client().Do(customerAdminRequest)
+	var customerAdminError map[string]string
+	decodeResponse(t, customerAdminResponse, http.StatusForbidden, &customerAdminError)
 
 	request, _ := http.NewRequest(http.MethodGet, server.URL+"/accounts", nil)
 	request.AddCookie(cookies[0])
@@ -60,13 +67,49 @@ func TestAuthenticationAndAccountAuthorizationEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticated GET /accounts: %v", err)
 	}
+	var pendingError map[string]string
+	decodeResponse(t, accountsResponse, http.StatusForbidden, &pendingError)
+
+	adminLogin := postLogin(t, server, "admin@example.com", "admin-password-123")
+	var admin domain.Principal
+	decodeResponse(t, adminLogin, http.StatusOK, &admin)
+	adminCookie := adminLogin.Cookies()[0]
+	adminBankingRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/accounts", nil)
+	adminBankingRequest.AddCookie(adminCookie)
+	adminBankingResponse, _ := server.Client().Do(adminBankingRequest)
+	var adminBankingError map[string]string
+	decodeResponse(t, adminBankingResponse, http.StatusForbidden, &adminBankingError)
+	passportRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/admin/applications/"+onboarded.CustomerID+"/passport", nil)
+	passportRequest.AddCookie(adminCookie)
+	passportResponse, _ := server.Client().Do(passportRequest)
+	if passportResponse.StatusCode != http.StatusOK || passportResponse.Header.Get("Content-Type") != "image/png" {
+		t.Fatalf("passport status=%d type=%s", passportResponse.StatusCode, passportResponse.Header.Get("Content-Type"))
+	}
+	passportResponse.Body.Close()
+	approve, _ := http.NewRequest(http.MethodPost, server.URL+"/admin/applications/"+onboarded.CustomerID+"/approve", nil)
+	approve.AddCookie(adminCookie)
+	approvedResponse, err := server.Client().Do(approve)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if approvedResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("approve status = %d", approvedResponse.StatusCode)
+	}
+	approvedResponse.Body.Close()
+
+	request, _ = http.NewRequest(http.MethodGet, server.URL+"/accounts", nil)
+	request.AddCookie(cookies[0])
+	accountsResponse, err = server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("approved GET /accounts: %v", err)
+	}
 	var accounts struct {
 		Accounts []struct {
 			ID string `json:"id"`
 		} `json:"accounts"`
 	}
 	decodeResponse(t, accountsResponse, http.StatusOK, &accounts)
-	if len(accounts.Accounts) != 1 || accounts.Accounts[0].ID != onboarded.AccountID {
+	if len(accounts.Accounts) != 1 || accounts.Accounts[0].ID == "" {
 		t.Fatalf("accounts = %+v", accounts)
 	}
 

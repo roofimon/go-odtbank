@@ -69,11 +69,13 @@ export type OnboardingRequest = {
   initial_deposit: number;
 };
 
-export type Principal = { customer_id: string; account_id: string; email: string };
+export type KYCStatus = "waiting_for_approval" | "approved" | "rejected";
+export type Principal = { customer_id?: string; account_id?: string; admin_id?: string; email: string; role: "customer" | "admin"; kyc_status?: KYCStatus; rejection_reason?: string };
 
 export type OnboardingReceipt = {
   customer_id: string;
-  account_id: string;
-  kyc_status: "verified";
-  balance: number;
+  kyc_status: "waiting_for_approval";
 };
+
+export type ApplicationSummary = { customer_id: string; legal_first_name: string; legal_last_name: string; email: string; kyc_status: KYCStatus; requested_initial_deposit: number; created_at: string; reviewed_at?: string; rejection_reason?: string };
+export type ApplicationDetail = ApplicationSummary & { date_of_birth: string; nationality: string; phone: string; residential_address: OnboardingRequest["residential_address"]; government_document: OnboardingRequest["government_document"]; passport_image_mime: string };

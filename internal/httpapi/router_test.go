@@ -143,12 +143,12 @@ func TestHandleWithdrawRejectsInvalidJSON(t *testing.T) {
 
 func TestHandleOnboardingSuccess(t *testing.T) {
 	svc := stubOnboardingService{receipt: &domain.OnboardingReceipt{
-		CustomerID: "cus_1", AccountID: "acc_1", KYCStatus: "verified", Balance: 25,
+		CustomerID: "cus_1", KYCStatus: domain.KYCWaiting,
 	}}
 	response := httptest.NewRecorder()
 	request := onboardingMultipartRequest(t, `{"legal_first_name":"Ada"}`)
 	handleOnboarding(svc).ServeHTTP(response, request)
-	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"account_id":"acc_1"`) {
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"kyc_status":"waiting_for_approval"`) {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }

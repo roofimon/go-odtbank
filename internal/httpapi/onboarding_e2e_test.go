@@ -39,11 +39,9 @@ func TestOnboardingEndToEnd(t *testing.T) {
 	response := postOnboarding(t, server, payload)
 	var receipt domain.OnboardingReceipt
 	decodeResponse(t, response, http.StatusCreated, &receipt)
-	if receipt.CustomerID == "" || receipt.AccountID == "" || receipt.KYCStatus != "verified" || receipt.Balance != 25 {
+	if receipt.CustomerID == "" || receipt.KYCStatus != domain.KYCWaiting {
 		t.Fatalf("receipt = %+v", receipt)
 	}
-	assertE2EAccount(t, server, receipt.AccountID, 25, 1)
-	assertE2ELastEvent(t, server, receipt.AccountID, 0, "AccountOpened", 25)
 
 	duplicateResponse := postOnboarding(t, server, payload)
 	var duplicateError map[string]string
@@ -52,8 +50,8 @@ func TestOnboardingEndToEnd(t *testing.T) {
 		t.Fatalf("duplicate error = %+v", duplicateError)
 	}
 	ids, _ := store.ListAggregates()
-	if len(ids) != 1 {
-		t.Fatalf("aggregate count = %d, want 1", len(ids))
+	if len(ids) != 0 {
+		t.Fatalf("aggregate count = %d, want 0", len(ids))
 	}
 }
 

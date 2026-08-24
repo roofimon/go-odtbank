@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"go-odtbank/internal/domain"
 )
 
 const passwordIterations = 600000
@@ -20,6 +22,13 @@ func hashPassword(password string) (string, error) {
 	hash := pbkdf2SHA256([]byte(password), salt, passwordIterations, 32)
 	return fmt.Sprintf("pbkdf2_sha256$%d$%s$%s", passwordIterations,
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
+}
+
+func HashPassword(password string) (string, error) {
+	if len(password) < 10 || len(password) > 128 {
+		return "", domain.ErrInvalidOnboarding
+	}
+	return hashPassword(password)
 }
 
 func verifyPassword(encoded, password string) bool {

@@ -33,7 +33,7 @@ func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
-func (s *PostgresStore) CreateCustomerAccount(customer domain.Customer, opened domain.AccountOpened) error {
+func (s *PostgresStore) CreateCustomerApplication(customer domain.Customer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
@@ -48,37 +48,22 @@ func (s *PostgresStore) CreateCustomerAccount(customer domain.Customer, opened d
 			nationality, email, phone, password_hash, address_line1, address_line2, city,
 			state_or_province, postal_code, country, document_type,
 			document_number, document_issuing_country, passport_image,
-			passport_image_mime, kyc_status, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
-	`, customer.ID, customer.AccountID, customer.LegalFirstName, customer.LegalLastName,
+			passport_image_mime, kyc_status, requested_initial_deposit, created_at
+		) VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+	`, customer.ID, customer.LegalFirstName, customer.LegalLastName,
 		customer.DateOfBirth, customer.Nationality, customer.Email, customer.Phone, customer.PasswordHash,
 		customer.ResidentialAddress.Line1, customer.ResidentialAddress.Line2,
 		customer.ResidentialAddress.City, customer.ResidentialAddress.StateOrProvince,
 		customer.ResidentialAddress.PostalCode, customer.ResidentialAddress.Country,
 		customer.GovernmentDocument.Type, customer.GovernmentDocument.Number,
 		customer.GovernmentDocument.IssuingCountry, customer.PassportImage,
-		customer.PassportImageMIME, customer.KYCStatus, customer.CreatedAt)
+		customer.PassportImageMIME, customer.KYCStatus, customer.RequestedDeposit, customer.CreatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return domain.ErrCustomerAlreadyExists
 		}
 		return fmt.Errorf("eventstore: insert customer: %w", err)
-	}
-	payload, err := json.Marshal(opened)
-	if err != nil {
-		return fmt.Errorf("eventstore: marshal opening event: %w", err)
-	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO events (aggregate_id, sequence, event_type, payload, occurred_at)
-		VALUES ($1, 0, $2, $3, $4)
-	`, opened.AggregateID(), opened.EventType(), payload, opened.OccurredAt())
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return ErrConcurrencyConflict
-		}
-		return fmt.Errorf("eventstore: insert opening event: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("eventstore: commit onboarding: %w", err)
@@ -90,8 +75,8 @@ func (s *PostgresStore) FindCustomerByEmail(email string) (*domain.Customer, err
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var customer domain.Customer
-	err := s.pool.QueryRow(ctx, `SELECT id, account_id, email, password_hash FROM customers WHERE lower(email)=lower($1)`, email).
-		Scan(&customer.ID, &customer.AccountID, &customer.Email, &customer.PasswordHash)
+	err := s.pool.QueryRow(ctx, `SELECT id, COALESCE(account_id,''), email, password_hash, kyc_status, rejection_reason FROM customers WHERE lower(email)=lower($1)`, email).
+		Scan(&customer.ID, &customer.AccountID, &customer.Email, &customer.PasswordHash, &customer.KYCStatus, &customer.RejectionReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrInvalidCredentials
 	}
@@ -101,10 +86,30 @@ func (s *PostgresStore) FindCustomerByEmail(email string) (*domain.Customer, err
 	return &customer, nil
 }
 
+func (s *PostgresStore) FindAdminByEmail(email string) (*domain.Admin, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var a domain.Admin
+	err := s.pool.QueryRow(ctx, `SELECT id,email,password_hash FROM admins WHERE lower(email)=lower($1)`, email).Scan(&a.ID, &a.Email, &a.PasswordHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrInvalidCredentials
+	}
+	if err != nil {
+		return nil, fmt.Errorf("eventstore: find admin: %w", err)
+	}
+	return &a, nil
+}
+func (s *PostgresStore) UpsertAdmin(a domain.Admin) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `INSERT INTO admins(id,email,password_hash) VALUES($1,$2,$3) ON CONFLICT (lower(email)) DO UPDATE SET password_hash=EXCLUDED.password_hash`, a.ID, a.Email, a.PasswordHash)
+	return err
+}
+
 func (s *PostgresStore) CreateSession(session domain.Session) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := s.pool.Exec(ctx, `INSERT INTO sessions (token_hash, customer_id, account_id, expires_at) VALUES ($1,$2,$3,$4)`, session.TokenHash, session.CustomerID, session.AccountID, session.ExpiresAt)
+	_, err := s.pool.Exec(ctx, `INSERT INTO sessions (token_hash, customer_id, account_id, admin_id, expires_at) VALUES ($1,NULLIF($2,''),NULL,NULLIF($3,''),$4)`, session.TokenHash, session.CustomerID, session.AdminID, session.ExpiresAt)
 	if err != nil {
 		return fmt.Errorf("eventstore: create session: %w", err)
 	}
@@ -115,8 +120,8 @@ func (s *PostgresStore) FindSession(tokenHash string, now time.Time) (*domain.Pr
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var principal domain.Principal
-	err := s.pool.QueryRow(ctx, `SELECT s.customer_id, s.account_id, c.email FROM sessions s JOIN customers c ON c.id=s.customer_id WHERE s.token_hash=$1 AND s.expires_at>$2`, tokenHash, now).
-		Scan(&principal.CustomerID, &principal.AccountID, &principal.Email)
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(s.customer_id,''),COALESCE(c.account_id,''),COALESCE(s.admin_id,''),COALESCE(c.email,a.email),CASE WHEN s.admin_id IS NULL THEN 'customer' ELSE 'admin' END,COALESCE(c.kyc_status,''),COALESCE(c.rejection_reason,'') FROM sessions s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN admins a ON a.id=s.admin_id WHERE s.token_hash=$1 AND s.expires_at>$2`, tokenHash, now).
+		Scan(&principal.CustomerID, &principal.AccountID, &principal.AdminID, &principal.Email, &principal.Role, &principal.KYCStatus, &principal.RejectionReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrUnauthorized
 	}
@@ -135,6 +140,101 @@ func (s *PostgresStore) DeleteSession(tokenHash string) error {
 	}
 	return nil
 }
+
+func (s *PostgresStore) ListApplications(status string) ([]domain.ApplicationSummary, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.pool.Query(ctx, `SELECT id,legal_first_name,legal_last_name,email,kyc_status,requested_initial_deposit,created_at,reviewed_at,rejection_reason FROM customers WHERE kyc_status=$1 ORDER BY created_at`, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.ApplicationSummary{}
+	for rows.Next() {
+		var a domain.ApplicationSummary
+		if err := rows.Scan(&a.CustomerID, &a.LegalFirstName, &a.LegalLastName, &a.Email, &a.KYCStatus, &a.RequestedDeposit, &a.CreatedAt, &a.ReviewedAt, &a.RejectionReason); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+func (s *PostgresStore) GetApplication(id string) (*domain.ApplicationDetail, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var a domain.ApplicationDetail
+	err := s.pool.QueryRow(ctx, `SELECT id,legal_first_name,legal_last_name,email,kyc_status,requested_initial_deposit,created_at,reviewed_at,rejection_reason,date_of_birth,nationality,phone,address_line1,address_line2,city,state_or_province,postal_code,country,document_type,document_number,document_issuing_country,passport_image_mime FROM customers WHERE id=$1`, id).Scan(&a.CustomerID, &a.LegalFirstName, &a.LegalLastName, &a.Email, &a.KYCStatus, &a.RequestedDeposit, &a.CreatedAt, &a.ReviewedAt, &a.RejectionReason, &a.DateOfBirth, &a.Nationality, &a.Phone, &a.ResidentialAddress.Line1, &a.ResidentialAddress.Line2, &a.ResidentialAddress.City, &a.ResidentialAddress.StateOrProvince, &a.ResidentialAddress.PostalCode, &a.ResidentialAddress.Country, &a.GovernmentDocument.Type, &a.GovernmentDocument.Number, &a.GovernmentDocument.IssuingCountry, &a.PassportImageMIME)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrApplicationNotFound
+	}
+	return &a, err
+}
+func (s *PostgresStore) GetPassportImage(id string) ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var b []byte
+	var mime string
+	err := s.pool.QueryRow(ctx, `SELECT passport_image,passport_image_mime FROM customers WHERE id=$1`, id).Scan(&b, &mime)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "", domain.ErrApplicationNotFound
+	}
+	return b, mime, err
+}
+func (s *PostgresStore) ApproveApplication(id, adminID, accountID string, at time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	var amount float64
+	err = tx.QueryRow(ctx, `SELECT kyc_status,requested_initial_deposit FROM customers WHERE id=$1 FOR UPDATE`, id).Scan(&status, &amount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrApplicationNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != domain.KYCWaiting {
+		return domain.ErrApplicationReviewed
+	}
+	opened := domain.AccountOpened{Aggregate: accountID, Type: "AccountOpened", Seq: 0, Occurred: at, ID: accountID, InitialBalance: amount}
+	payload, err := json.Marshal(opened)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO events(aggregate_id,sequence,event_type,payload,occurred_at) VALUES($1,0,$2,$3,$4)`, accountID, opened.EventType(), payload, at); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE customers SET account_id=$2,kyc_status=$3,reviewed_by=$4,reviewed_at=$5 WHERE id=$1`, id, accountID, domain.KYCApproved, adminID, at)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+func (s *PostgresStore) RejectApplication(id, adminID, reason string, at time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tag, err := s.pool.Exec(ctx, `UPDATE customers SET kyc_status=$2,reviewed_by=$3,reviewed_at=$4,rejection_reason=$5 WHERE id=$1 AND kyc_status=$6`, id, domain.KYCRejected, adminID, at, reason, domain.KYCWaiting)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customers WHERE id=$1)`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return domain.ErrApplicationNotFound
+		}
+		return domain.ErrApplicationReviewed
+	}
+	return nil
+}
+
+var _ domain.ReviewStore = (*PostgresStore)(nil)
 
 // Append inserts a single event. expectedVersion must equal the current
 // stream length for the aggregate; a mismatch returns ErrConcurrencyConflict.

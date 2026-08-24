@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -53,6 +54,26 @@ func main() {
 		log.Fatal("configured store does not support authentication")
 	}
 	authService := service.NewAuthService(authStore)
+	reviewStore, ok := store.(domain.ReviewStore)
+	if !ok {
+		log.Fatal("configured store does not support application review")
+	}
+	reviewService := service.NewReviewService(reviewStore)
+	if _, memory := store.(*eventstore.MemoryStore); memory {
+		email, password := os.Getenv("ADMIN_EMAIL"), os.Getenv("ADMIN_PASSWORD")
+		if (email == "") != (password == "") {
+			log.Fatal("ADMIN_EMAIL and ADMIN_PASSWORD must be set together")
+		}
+		if email != "" {
+			hash, err := service.HashPassword(password)
+			if err != nil {
+				log.Fatal("invalid ADMIN_PASSWORD")
+			}
+			if err := authStore.UpsertAdmin(domain.Admin{ID: "adm_dev", Email: strings.ToLower(strings.TrimSpace(email)), PasswordHash: hash}); err != nil {
+				log.Fatalf("seed admin: %v", err)
+			}
+		}
+	}
 
 	// 3. Setup HTTP transport
 	handler := httpapi.NewRouter(httpapi.Dependencies{
@@ -62,6 +83,7 @@ func main() {
 		WithdrawService:   withdrawService,
 		OnboardingService: onboardingService,
 		AuthService:       authService,
+		ReviewService:     reviewService,
 		CookieSecure:      os.Getenv("COOKIE_SECURE") == "true",
 		CORSOrigins:       os.Getenv("CORS_ORIGINS"),
 	})

@@ -1,5 +1,7 @@
 import type {
   Account,
+  ApplicationDetail,
+  ApplicationSummary,
   AccountsWithMeta,
   DepositReceipt,
   EventLogResponse,
@@ -124,3 +126,10 @@ export function login(email: string, password: string): Promise<Principal> {
 export function logout(): Promise<void> {
   return request<void>("/logout", { method: "POST" });
 }
+
+export function getMe(cookie?: string): Promise<Principal> { return request<Principal>("/me", cookie ? { headers: { Cookie: cookie } } : undefined); }
+export function getApplications(status: string, cookie?: string): Promise<ApplicationSummary[]> { return request<{ applications: ApplicationSummary[] }>(`/admin/applications?status=${encodeURIComponent(status)}`, cookie ? { headers: { Cookie: cookie } } : undefined).then((r) => r.applications); }
+export function getApplication(id: string): Promise<ApplicationDetail> { return request<ApplicationDetail>(`/admin/applications/${encodeURIComponent(id)}`); }
+export function approveApplication(id: string): Promise<void> { return request<void>(`/admin/applications/${encodeURIComponent(id)}/approve`, { method: "POST" }); }
+export function rejectApplication(id: string, reason: string): Promise<void> { return request<void>(`/admin/applications/${encodeURIComponent(id)}/reject`, { method: "POST" }, JSON.stringify({ reason })); }
+export async function getPassport(id: string): Promise<Blob> { const response = await fetch(`${API_URL}/admin/applications/${encodeURIComponent(id)}/passport`, { credentials: "include", cache: "no-store" }); if (!response.ok) throw new ApiError(response.status, "Could not load passport image"); return response.blob(); }

@@ -42,13 +42,9 @@ func (s *OnboardingService) Onboard(command domain.OnboardingCommand) (*domain.O
 	if err != nil {
 		return nil, fmt.Errorf("generate customer id: %w", err)
 	}
-	accountID, err := randomID("acc_")
-	if err != nil {
-		return nil, fmt.Errorf("generate account id: %w", err)
-	}
 	now := time.Now().UTC()
 	customer := domain.Customer{
-		ID: customerID, AccountID: accountID,
+		ID:             customerID,
 		LegalFirstName: command.LegalFirstName, LegalLastName: command.LegalLastName,
 		DateOfBirth: birthDate, Nationality: command.Nationality,
 		Email: command.Email, Phone: command.Phone,
@@ -57,18 +53,13 @@ func (s *OnboardingService) Onboard(command domain.OnboardingCommand) (*domain.O
 		GovernmentDocument: command.GovernmentDocument,
 		PassportImage:      command.PassportImage,
 		PassportImageMIME:  http.DetectContentType(command.PassportImage),
-		KYCStatus:          "verified", CreatedAt: now,
+		KYCStatus:          domain.KYCWaiting, RequestedDeposit: command.InitialDeposit, CreatedAt: now,
 	}
-	opened := domain.AccountOpened{
-		Aggregate: accountID, Type: "AccountOpened", Seq: 0, Occurred: now,
-		ID: accountID, InitialBalance: command.InitialDeposit,
-	}
-	if err := s.store.CreateCustomerAccount(customer, opened); err != nil {
+	if err := s.store.CreateCustomerApplication(customer); err != nil {
 		return nil, err
 	}
 	return &domain.OnboardingReceipt{
-		CustomerID: customerID, AccountID: accountID,
-		KYCStatus: "verified", Balance: command.InitialDeposit,
+		CustomerID: customerID, KYCStatus: domain.KYCWaiting,
 	}, nil
 }
 

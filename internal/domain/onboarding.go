@@ -6,18 +6,18 @@ import (
 )
 
 type ResidentialAddress struct {
-	Line1           string
-	Line2           string
-	City            string
-	StateOrProvince string
-	PostalCode      string
-	Country         string
+	Line1           string `json:"line1"`
+	Line2           string `json:"line2"`
+	City            string `json:"city"`
+	StateOrProvince string `json:"state_or_province"`
+	PostalCode      string `json:"postal_code"`
+	Country         string `json:"country"`
 }
 
 type GovernmentDocument struct {
-	Type           string
-	Number         string
-	IssuingCountry string
+	Type           string `json:"type"`
+	Number         string `json:"number"`
+	IssuingCountry string `json:"issuing_country"`
 }
 
 type OnboardingCommand struct {
@@ -49,14 +49,16 @@ type Customer struct {
 	PassportImage      []byte
 	PassportImageMIME  string
 	KYCStatus          string
+	RequestedDeposit   float64
+	ReviewedBy         string
+	ReviewedAt         *time.Time
+	RejectionReason    string
 	CreatedAt          time.Time
 }
 
 type OnboardingReceipt struct {
-	CustomerID string  `json:"customer_id"`
-	AccountID  string  `json:"account_id"`
-	KYCStatus  string  `json:"kyc_status"`
-	Balance    float64 `json:"balance"`
+	CustomerID string `json:"customer_id"`
+	KYCStatus  string `json:"kyc_status"`
 }
 
 type OnboardingService interface {
@@ -64,8 +66,14 @@ type OnboardingService interface {
 }
 
 type OnboardingStore interface {
-	CreateCustomerAccount(customer Customer, opened AccountOpened) error
+	CreateCustomerApplication(customer Customer) error
 }
+
+const (
+	KYCWaiting  = "waiting_for_approval"
+	KYCApproved = "approved"
+	KYCRejected = "rejected"
+)
 
 var (
 	ErrInvalidOnboarding     = errors.New("invalid onboarding data")

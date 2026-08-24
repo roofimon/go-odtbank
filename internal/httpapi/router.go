@@ -23,6 +23,7 @@ type Dependencies struct {
 	WithdrawService   domain.WithdrawService
 	OnboardingService domain.OnboardingService
 	AuthService       domain.AuthService
+	ReviewService     domain.ReviewService
 	CookieSecure      bool
 	CORSOrigins       string
 }
@@ -37,11 +38,26 @@ func NewRouter(deps Dependencies) http.Handler {
 	}
 	router.HandleFunc("/logout", protect(handleLogout(deps.AuthService, deps.CookieSecure))).Methods(http.MethodPost)
 	router.HandleFunc("/me", protect(handleMe())).Methods(http.MethodGet)
-	router.HandleFunc("/transfer", protect(handleTransfer(deps.TransferService))).Methods(http.MethodPost)
-	router.HandleFunc("/deposit", protect(handleDeposit(deps.DepositService))).Methods(http.MethodPost)
-	router.HandleFunc("/withdraw", protect(handleWithdraw(deps.WithdrawService))).Methods(http.MethodPost)
-	router.HandleFunc("/accounts", protect(handleListAccounts(deps.Store))).Methods(http.MethodGet)
-	router.HandleFunc("/accounts/{id}/events", protect(handleAccountEvents(deps.Store))).Methods(http.MethodGet)
+	banking := protect
+	admin := protect
+	if deps.AuthService != nil {
+		banking = func(h http.HandlerFunc) http.HandlerFunc {
+			return requireAuth(deps.AuthService, requireApprovedCustomer(h))
+		}
+		admin = func(h http.HandlerFunc) http.HandlerFunc { return requireAuth(deps.AuthService, requireAdmin(h)) }
+	}
+	router.HandleFunc("/transfer", banking(handleTransfer(deps.TransferService))).Methods(http.MethodPost)
+	router.HandleFunc("/deposit", banking(handleDeposit(deps.DepositService))).Methods(http.MethodPost)
+	router.HandleFunc("/withdraw", banking(handleWithdraw(deps.WithdrawService))).Methods(http.MethodPost)
+	router.HandleFunc("/accounts", banking(handleListAccounts(deps.Store))).Methods(http.MethodGet)
+	router.HandleFunc("/accounts/{id}/events", banking(handleAccountEvents(deps.Store))).Methods(http.MethodGet)
+	if deps.ReviewService != nil {
+		router.HandleFunc("/admin/applications", admin(handleApplications(deps.ReviewService))).Methods(http.MethodGet)
+		router.HandleFunc("/admin/applications/{id}", admin(handleApplication(deps.ReviewService))).Methods(http.MethodGet)
+		router.HandleFunc("/admin/applications/{id}/passport", admin(handlePassport(deps.ReviewService))).Methods(http.MethodGet)
+		router.HandleFunc("/admin/applications/{id}/approve", admin(handleApprove(deps.ReviewService))).Methods(http.MethodPost)
+		router.HandleFunc("/admin/applications/{id}/reject", admin(handleReject(deps.ReviewService))).Methods(http.MethodPost)
+	}
 	return withCORS(router, deps.CORSOrigins)
 }
 
@@ -265,6 +281,86 @@ func requireAuth(auth domain.AuthService, next http.HandlerFunc) http.HandlerFun
 	}
 }
 
+func requireApprovedCustomer(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := principalFromRequest(r)
+		if p == nil || p.Role != "customer" || p.KYCStatus != domain.KYCApproved || p.AccountID == "" {
+			writeError(w, http.StatusForbidden, domain.ErrForbidden.Error())
+			return
+		}
+		next(w, r)
+	}
+}
+func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := principalFromRequest(r)
+		if p == nil || p.Role != "admin" {
+			writeError(w, http.StatusForbidden, domain.ErrForbidden.Error())
+			return
+		}
+		next(w, r)
+	}
+}
+
+func handleApplications(s domain.ReviewService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		items, err := s.List(r.URL.Query().Get("status"))
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"applications": items})
+	}
+}
+func handleApplication(s domain.ReviewService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		item, err := s.Get(mux.Vars(r)["id"])
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+	}
+}
+func handlePassport(s domain.ReviewService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, mime, err := s.Passport(mux.Vars(r)["id"])
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}
+}
+func handleApprove(s domain.ReviewService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Approve(mux.Vars(r)["id"], principalFromRequest(r).AdminID); err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+func handleReject(s domain.ReviewService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if err := s.Reject(mux.Vars(r)["id"], principalFromRequest(r).AdminID, req.Reason); err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func principalFromRequest(r *http.Request) *domain.Principal {
 	principal, _ := r.Context().Value(principalContextKey{}).(*domain.Principal)
 	return principal
@@ -363,6 +459,12 @@ func statusForError(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, domain.ErrCustomerAlreadyExists):
 		return http.StatusConflict
+	case errors.Is(err, domain.ErrApplicationNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, domain.ErrApplicationReviewed):
+		return http.StatusConflict
+	case errors.Is(err, domain.ErrInvalidReviewStatus), errors.Is(err, domain.ErrInvalidRejectionReason):
+		return http.StatusBadRequest
 	default:
 		var fundErr *domain.InsufficientFundsError
 		if errors.As(err, &fundErr) {

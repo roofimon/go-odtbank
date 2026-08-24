@@ -1,0 +1,16 @@
+ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_identity_check;
+ALTER TABLE sessions DROP COLUMN IF EXISTS admin_id;
+DELETE FROM sessions WHERE customer_id IS NULL;
+DELETE FROM sessions WHERE account_id IS NULL;
+ALTER TABLE sessions ALTER COLUMN customer_id SET NOT NULL;
+ALTER TABLE sessions ALTER COLUMN account_id SET NOT NULL;
+ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_reviewer_fk;
+DROP INDEX IF EXISTS admins_email_unique;
+DROP TABLE IF EXISTS admins;
+UPDATE customers SET kyc_status = 'verified' WHERE kyc_status = 'approved';
+DELETE FROM customers WHERE account_id IS NULL;
+ALTER TABLE customers DROP COLUMN IF EXISTS rejection_reason;
+ALTER TABLE customers DROP COLUMN IF EXISTS reviewed_at;
+ALTER TABLE customers DROP COLUMN IF EXISTS reviewed_by;
+ALTER TABLE customers DROP COLUMN IF EXISTS requested_initial_deposit;
+ALTER TABLE customers ALTER COLUMN account_id SET NOT NULL;

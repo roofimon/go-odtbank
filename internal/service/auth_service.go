@@ -16,20 +16,31 @@ type AuthService struct{ store domain.AuthStore }
 func NewAuthService(store domain.AuthStore) *AuthService { return &AuthService{store: store} }
 
 func (s *AuthService) Login(email, password string) (string, *domain.Principal, error) {
-	customer, err := s.store.FindCustomerByEmail(strings.ToLower(strings.TrimSpace(email)))
-	if err != nil || !verifyPassword(customer.PasswordHash, password) {
-		return "", nil, domain.ErrInvalidCredentials
+	email = strings.ToLower(strings.TrimSpace(email))
+	var session domain.Session
+	var principal *domain.Principal
+	if admin, err := s.store.FindAdminByEmail(email); err == nil && verifyPassword(admin.PasswordHash, password) {
+		session.AdminID = admin.ID
+		principal = &domain.Principal{AdminID: admin.ID, Email: admin.Email, Role: "admin"}
+	} else {
+		customer, err := s.store.FindCustomerByEmail(email)
+		if err != nil || !verifyPassword(customer.PasswordHash, password) {
+			return "", nil, domain.ErrInvalidCredentials
+		}
+		session.CustomerID = customer.ID
+		principal = &domain.Principal{CustomerID: customer.ID, AccountID: customer.AccountID, Email: customer.Email, Role: "customer", KYCStatus: customer.KYCStatus, RejectionReason: customer.RejectionReason}
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", nil, err
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
-	session := domain.Session{TokenHash: tokenHash(token), CustomerID: customer.ID, AccountID: customer.AccountID, ExpiresAt: time.Now().UTC().Add(24 * time.Hour)}
+	session.TokenHash = tokenHash(token)
+	session.ExpiresAt = time.Now().UTC().Add(24 * time.Hour)
 	if err := s.store.CreateSession(session); err != nil {
 		return "", nil, err
 	}
-	return token, &domain.Principal{CustomerID: customer.ID, AccountID: customer.AccountID, Email: customer.Email}, nil
+	return token, principal, nil
 }
 
 func (s *AuthService) Authenticate(token string) (*domain.Principal, error) {
