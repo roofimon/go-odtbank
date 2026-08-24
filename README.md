@@ -1,175 +1,133 @@
 # go-odtbank
 
-A small Go HTTP service that supports money transfers, deposits, and withdrawals. The account ledger is **event-sourced**: account state is derived from an append-only event log, not mutated in place. Two interchangeable store implementations ship — in-memory and Postgres.
+An event-sourced banking demo built with Go, PostgreSQL, and Next.js. It supports transfers, deposits, withdrawals, account balances, and per-account transaction history.
 
-## Overview
+Account balances are not stored as mutable rows. Each balance is rebuilt by replaying an append-only stream of `AccountOpened`, `MoneyCredited`, and `MoneyDebited` events.
 
-- **Domain** defines entities and contracts with no external dependencies. `Account` is a stateless struct; current state is folded from events.
-- **Service** holds the core use case (transfer money between accounts), orchestrating event appends against an `eventstore.Store`.
-- **Event store** persists the append-only log. Two implementations:
-  - `eventstore.MemoryStore` — used for tests and zero-setup local runs.
-  - `eventstore.PostgresStore` — backed by a single `events` table, gated on the `DATABASE_URL` env var.
-- **Repository** is a thin projection over the event store (replays events on demand).
-- **Policy** encapsulates fee calculation and service-availability rules.
-- **Event bus** publishes a `TransferCompletedEvent` after each successful transfer (the integration event, distinct from the per-account stored events).
+## Features
 
-The HTTP entry point wires dependencies and delegates transfer, deposit, withdrawal, account-list, and event-log routes to `internal/httpapi`.
+- Transfer money between existing accounts (minimum `1.00`).
+- Deposit into an existing account (minimum `10.00`).
+- Withdraw from an existing account (minimum `10.00`, subject to available funds).
+- Run with an in-memory event store or PostgreSQL.
+- Detect concurrent writes with per-aggregate sequence numbers.
+- Browse accounts and their event history in a responsive Next.js dashboard.
 
-## Project Layout
+## Architecture
 
+```text
+Next.js dashboard
+        │ HTTP/JSON
+        ▼
+internal/httpapi
+  router · handlers · DTOs · CORS · status mapping
+        │
+        ├── TransferService ── FeePolicy · TimeService · EventBus
+        ├── DepositService
+        └── WithdrawService
+                 │
+                 ▼
+          eventstore.Store
+          ├── MemoryStore
+          └── PostgresStore
+                 │
+                 ▼
+       append-only account streams
 ```
-.
-├── go.mod
-├── go.sum
-├── docker-compose.yml         # Local Postgres for development
-├── Makefile                   # up / down / migrate / run / test / web-dev
-├── migrations/                # Plain SQL migrations for the `events` table
-│   ├── 0001_init.up.sql
-│   └── 0001_init.down.sql
-├── web/                       # Next.js (TS) dashboard (see web/ section below)
-├── cmd/
-│   └── server/
-│       └── main.go            # Entry point: wires dependencies, starts HTTP server
-└── internal/
-    ├── domain/                # Entities + interface contracts (no external deps)
-    │   ├── account.go         # Account, TransferReceipt, ReplayAccount, errors
-    │   ├── events.go          # Event interface + AccountOpened / MoneyDebited / MoneyCredited
-    │   └── interfaces.go      # AccountRepository, FeePolicy, TimeService, TransferService
-    ├── service/
-    │   ├── deposit_service.go         # Deposit use case
-    │   ├── transfer_service.go        # Core use case: load → replay → emit events
-    │   └── withdraw_service.go        # Withdrawal use case
-    ├── repository/
-    │   └── memory_repo.go     # Thin projection over eventstore (replays on read)
-    ├── policy/
-    │   └── policies.go        # Flat / Zero / Variable fee policies + time service
-    ├── eventbus/
-    │   └── event_bus.go       # In-process pub/sub for TransferCompletedEvent
-    ├── httpapi/
-    │   └── router.go          # Router, handlers, DTOs, error mapping, and CORS
-    └── eventstore/
-        ├── store.go           # Store interface + ErrConcurrencyConflict
-        ├── memory_store.go    # In-memory append-only log
-        └── postgres_store.go  # Postgres-backed append-only log (pgx/v5)
 
-web/                           # Next.js (TS) browser dashboard
-├── components/
-│   ├── accounts-table.tsx     # Account list with balances
-│   ├── deposit-form.tsx       # Account deposit form
-│   ├── event-log.tsx          # Per-aggregate event stream table
-│   ├── transfer-form.tsx      # Money-transfer form
-│   └── withdraw-form.tsx      # Account withdrawal form
-└── lib/
-    ├── api.ts                 # Typed client for the Go backend
-    ├── format.ts              # Money / date formatting helpers
-    └── types.ts               # Shared TS types matching the Go wire format
+The domain package defines accounts, events, receipts, errors, and service contracts. Services load and replay account streams, validate commands, and append new events. `cmd/server` selects infrastructure, seeds demo accounts, wires dependencies, and starts the HTTP server.
+
+### Project layout
+
+```text
+cmd/server/             Application entry point and dependency wiring
+internal/domain/        Domain types, events, errors, and interfaces
+internal/service/       Transfer, deposit, and withdrawal use cases
+internal/httpapi/       Router, handlers, DTOs, CORS, and HTTP error mapping
+internal/eventstore/    In-memory and PostgreSQL event stores
+internal/eventbus/      In-process TransferCompletedEvent publisher
+internal/policy/        Fee and service-availability policies
+internal/repository/    Event-replay account projection
+migrations/             PostgreSQL schema migrations
+web/                    Next.js dashboard and typed API client
 ```
 
 ## Requirements
 
-- Go **1.27.0** or newer (per `go.mod`).
-- Module path: `go-odtbank`.
-- For the Postgres path: a running Postgres instance reachable via `DATABASE_URL`. Migrations are applied via Docker (no local CLI needed).
+- Go `1.27.0` or newer, as declared in `go.mod`.
+- Node.js and npm for the dashboard.
+- Docker with Docker Compose for the PostgreSQL development path.
 
-## Dependencies
+## Quick start
 
-| Module                                    | Purpose                                              |
-| ----------------------------------------- | ---------------------------------------------------- |
-| `github.com/gorilla/mux` v1.8.1           | HTTP request routing and method matching.              |
-| `github.com/jackc/pgx/v5` v5.x            | Postgres driver (only pulled in for the Postgres path). |
+### In-memory backend
 
-## Build & Test
-
-From the project root:
-
-```bash
-go build ./...
-go test ./...
-```
-
-## Run — In-memory (zero setup)
+No database setup is required:
 
 ```bash
 go run ./cmd/server
 ```
 
-If `DATABASE_URL` is **not** set, the server uses the in-memory event store. Two demo accounts are seeded on first startup:
+The API starts at `http://localhost:8080`. When `DATABASE_URL` is unset, two accounts are seeded in memory:
 
-| ID   | Balance |
-| ---- | ------- |
-| acc1 | 100.0   |
-| acc2 | 50.0    |
+| Account | Initial balance |
+| ------- | --------------- |
+| `acc1`  | `100.00`        |
+| `acc2`  | `50.00`         |
 
-## Run — Postgres
+Restarting the in-memory server resets all events.
 
-A `docker-compose.yml` is included for local development with two services:
+### Dashboard
 
-- **postgres** — `postgres:16-alpine` (database `odtbank`, user/password
-  `postgres`/`postgres`) on port **5432**, with a named volume
-  (`postgres-data`) so data survives restarts, and a `pg_isready` healthcheck.
-- **migrate** — the [`migrate/migrate`](https://hub.docker.com/r/migrate/migrate) image,
-  wired to `postgres` by service name so it can reach the database. It's
-  grouped under the `tools` profile so it never starts with a plain
-  `docker compose up`; you invoke it on demand for one-off migrations.
-
-> No local [`migrate`](https://github.com/golang-migrate/migrate) CLI is
-> required — the Docker image handles it.
-
-### Using `docker compose` directly
+In a second terminal:
 
 ```bash
-# 1. Start the Postgres container in the background.
+cd web
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. The navigation displays one feature at a time: Transfer, Deposit, Withdraw, or Transaction history.
+
+The browser calls `http://localhost:8080` by default. Override it when needed:
+
+```bash
+NEXT_PUBLIC_API_URL='https://api.example.com' npm run dev
+```
+
+The backend accepts browser requests through its CORS middleware. Set `CORS_ORIGINS` to a comma-separated origin allowlist; when unset, the middleware uses the request origin or `*`.
+
+## PostgreSQL development
+
+Start PostgreSQL and apply the migration:
+
+```bash
 docker compose up -d postgres
-
-# 2. Wait until it reports healthy.
-docker compose ps postgres
-
-# 3. Apply migrations (runs the `migrate/migrate` image once, then exits).
 docker compose run --rm migrate up
-
-# 4. Run the server with DATABASE_URL pointing at the container.
-DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' go run ./cmd/server
-
-# 5. Roll back the most recent migration (optional).
-docker compose run --rm migrate down 1
-
-# 6. Stop and remove the containers (data is kept in the volume).
-docker compose down
-
-# Or remove the containers *and* the data volume.
-docker compose down -v
 ```
 
-### Using the Makefile
-
-`make` wraps the same steps (see the target table below):
+Run the backend against it:
 
 ```bash
-make up           # docker compose up -d postgres
-make migrate      # run the migrate image: up
-make migrate-down # run the migrate image: down 1
-make run          # run the server with DATABASE_URL set
-make down         # docker compose down
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' \
+  go run ./cmd/server
 ```
 
-When `DATABASE_URL` is set, the server constructs `eventstore.PostgresStore` instead of the in-memory one. The choice lives at the wiring layer in `cmd/server/main.go`; the service layer is store-agnostic.
+Equivalent Make targets:
 
-### Useful Make targets
+| Command             | Purpose                                      |
+| ------------------- | -------------------------------------------- |
+| `make up`           | Start PostgreSQL.                            |
+| `make migrate`      | Apply all migrations.                        |
+| `make migrate-down` | Roll back one migration.                     |
+| `make run`          | Run the backend using the default local DSN. |
+| `make down`         | Stop the containers.                         |
 
-| Target           | What it does                                       |
-| ---------------- | -------------------------------------------------- |
-| `make up`        | Start the Postgres container.                      |
-| `make down`      | Stop and remove the container.                     |
-| `make migrate`   | Apply all up migrations via the `migrate` CLI.     |
-| `make migrate-down` | Roll back the most recent migration.            |
-| `make build`     | `go build ./...`                                   |
-| `make vet`       | `go vet ./...`                                     |
-| `make test`      | `go test ./...`                                    |
-| `make run`       | Run the server with `DATABASE_URL` set.            |
+PostgreSQL persists data in the `postgres-data` Docker volume. Use `docker compose down -v` only when you also want to remove that data.
 
-### Schema
+### Event schema
 
-The Postgres store uses a single table (see `migrations/0001_init.up.sql`):
+All aggregates share one table:
 
 ```sql
 CREATE TABLE events (
@@ -182,263 +140,150 @@ CREATE TABLE events (
 );
 ```
 
-- `(aggregate_id, sequence)` is the primary key — it gives both fast per-aggregate reads and free optimistic-concurrency on insert.
-- The payload column is JSONB; the Go side decodes it back into the right concrete event struct based on `event_type`.
+The `(aggregate_id, sequence)` primary key orders each stream and enforces optimistic concurrency. An append at an occupied sequence returns `ErrConcurrencyConflict`.
 
 ## API
 
-### `POST /transfer`
+All request and response bodies use `application/json`. Errors have the form:
 
-Transfer funds from one account to another.
+```json
+{"error":"account not found"}
+```
 
-**Request body** (`application/json`):
+### Transfer
+
+`POST /transfer`
+
+```bash
+curl -s http://localhost:8080/transfer \
+  -H 'Content-Type: application/json' \
+  -d '{"amount":10,"source_account_id":"acc1","destination_account_id":"acc2"}'
+```
 
 ```json
 {
-  "amount": 10.0,
-    "source_account_id": "acc1",
-    "destination_account_id": "acc2"
+  "InitialSourceAccount": {"ID":"acc1","Balance":100},
+  "InitialDestinationAccount": {"ID":"acc2","Balance":50},
+  "FinalSourceAccount": {"ID":"acc1","Balance":90},
+  "FinalDestinationAccount": {"ID":"acc2","Balance":60},
+  "TransferAmount": 10,
+  "FeeAmount": 0
 }
 ```
 
-**Successful response** (`200 OK`, `application/json`):
+The default wiring uses `ZeroFeePolicy`; flat and percentage fee policies are also available.
+
+### Deposit
+
+`POST /deposit`
+
+```bash
+curl -s http://localhost:8080/deposit \
+  -H 'Content-Type: application/json' \
+  -d '{"account_id":"acc1","amount":10}'
+```
 
 ```json
 {
-  "InitialSourceAccount":      { "ID": "acc1", "Balance": 100.0 },
-  "InitialDestinationAccount": { "ID": "acc2", "Balance": 50.0  },
-  "FinalSourceAccount":        { "ID": "acc1", "Balance": 75.0  },
-  "FinalDestinationAccount":   { "ID": "acc2", "Balance": 75.0  },
-  "TransferAmount":            10.0,
-  "FeeAmount":                 0.0
+  "InitialAccount": {"ID":"acc1","Balance":100},
+  "FinalAccount": {"ID":"acc1","Balance":110},
+  "DepositAmount": 10
 }
 ```
 
-On error the server returns a JSON body `{"error": "..."}` with a meaningful status code:
+### Withdraw
 
-| Error                       | Meaning                                                | Status |
-| --------------------------- | ------------------------------------------------------ | ------ |
-| `ErrInvalidTransferAmount`  | `amount` is below the minimum (1.0).                   | 400    |
-| `ErrOutOfService`           | The `TimeService` reports the service is unavailable.  | 503    |
-| `ErrAccountNotFound`        | Source or destination account does not exist.          | 404    |
-| `ErrConcurrencyConflict`    | Another writer appended to the same aggregate concurrently. | 409 |
-| `InsufficientFundsError`    | Source account balance is below `amount` (+ fee).      | 422    |
+`POST /withdraw`
 
-### `POST /deposit`
-
-Deposit at least `10.00` into an existing account.
-
-**Request body** (`application/json`):
+```bash
+curl -s http://localhost:8080/withdraw \
+  -H 'Content-Type: application/json' \
+  -d '{"account_id":"acc1","amount":10}'
+```
 
 ```json
 {
-  "account_id": "acc1",
-  "amount": 10.0
+  "InitialAccount": {"ID":"acc1","Balance":100},
+  "FinalAccount": {"ID":"acc1","Balance":90},
+  "WithdrawalAmount": 10
 }
 ```
 
-**Successful response** (`200 OK`, `application/json`):
+A withdrawal may reduce the balance to exactly zero but cannot exceed the available balance.
 
-```json
-{
-  "InitialAccount": { "ID": "acc1", "Balance": 100.0 },
-  "FinalAccount": { "ID": "acc1", "Balance": 110.0 },
-  "DepositAmount": 10.0
-}
-```
+### Read accounts
 
-Amounts below `10.00` or non-finite amounts return `400`, unknown accounts return `404`, and optimistic-concurrency conflicts return `409`.
-
-### `POST /withdraw`
-
-Withdraw at least `10.00` from an existing account. The withdrawal may reduce the balance to zero but cannot exceed the available balance.
-
-**Request body** (`application/json`):
-
-```json
-{
-  "account_id": "acc1",
-  "amount": 10.0
-}
-```
-
-**Successful response** (`200 OK`, `application/json`):
-
-```json
-{
-  "InitialAccount": { "ID": "acc1", "Balance": 100.0 },
-  "FinalAccount": { "ID": "acc1", "Balance": 90.0 },
-  "WithdrawalAmount": 10.0
-}
-```
-
-Amounts below `10.00` or non-finite amounts return `400`, unknown accounts return `404`, concurrency conflicts return `409`, and insufficient funds return `422`.
-
-### `GET /accounts`
-
-List all seeded accounts with their replayed balances.
-
-**Response** (`200 OK`, `application/json`):
+`GET /accounts`
 
 ```json
 {
   "accounts": [
-    { "id": "acc1", "balance": 90.0, "event_count": 2 },
-    { "id": "acc2", "balance": 60.0, "event_count": 2 }
+    {"id":"acc1","balance":90,"event_count":2},
+    {"id":"acc2","balance":60,"event_count":2}
   ]
 }
 ```
 
-### `GET /accounts/{id}/events`
-
-The full event stream for one aggregate (the event-sourced source of truth).
-
-**Response** (`200 OK`, `application/json`):
+`GET /accounts/{id}/events`
 
 ```json
 {
   "aggregate_id": "acc1",
   "events": [
-    { "seq": 0, "type": "AccountOpened", "amount": 100.0, "occurred_at": "2026-08-23T06:25:51Z" },
-    { "seq": 1, "type": "MoneyDebited",  "amount": 10.0,  "occurred_at": "2026-08-23T06:25:52Z" }
+    {"seq":0,"type":"AccountOpened","amount":100,"occurred_at":"2026-08-23T06:25:51Z"},
+    {"seq":1,"type":"MoneyDebited","amount":10,"occurred_at":"2026-08-23T06:25:52Z"}
   ]
 }
 ```
 
-## Web interface
+### Error status codes
 
-A Next.js (TypeScript) dashboard lives in `web/`. It reads accounts, shows each account's event log, and submits transfers, deposits, and withdrawals. The backend exposes the endpoints above and permissive CORS so the browser app can reach it directly.
+| Status | Meaning                                                         |
+| ------ | --------------------------------------------------------------- |
+| `400`  | Malformed JSON or an amount below the operation minimum.        |
+| `404`  | The requested source, destination, or target account is absent. |
+| `409`  | A concurrent append changed the aggregate sequence.             |
+| `422`  | The source or withdrawal account has insufficient funds.        |
+| `503`  | Transfers are disabled by the configured `TimeService`.         |
+| `500`  | An unexpected persistence or server error occurred.             |
+
+## Event model
+
+| Stored event    | Effect during account replay                                  |
+| --------------- | ------------------------------------------------------------- |
+| `AccountOpened` | Sets the initial balance.                                     |
+| `MoneyCredited` | Adds a deposit or destination-side transfer credit.           |
+| `MoneyDebited`  | Subtracts a withdrawal, fee, or source-side transfer debit.   |
+
+After a successful transfer, the service also publishes an in-process `TransferCompletedEvent`. This integration event is not stored in the account streams.
+
+## Build and test
+
+Backend checks:
 
 ```bash
-# Terminal 1 — backend
-go run ./cmd/server          # or: make run
-
-# Terminal 2 — frontend (http://localhost:3000)
-cd web && npm install && npm run dev
+make build
+make vet
+make test
 ```
 
-The UI calls `http://localhost:8080` by default; set `NEXT_PUBLIC_API_URL` to point elsewhere.
-
-### Example
+Dashboard checks:
 
 ```bash
-curl -s -X POST http://localhost:8080/transfer \
-  -H 'Content-Type: application/json' \
-  -d '{"amount": 25.0, "source_account_id": "acc1", "destination_account_id": "acc2"}'
-
-curl -s -X POST http://localhost:8080/deposit \
-  -H 'Content-Type: application/json' \
-  -d '{"amount": 10.0, "account_id": "acc1"}'
-
-curl -s -X POST http://localhost:8080/withdraw \
-  -H 'Content-Type: application/json' \
-  -d '{"amount": 10.0, "account_id": "acc1"}'
+cd web
+npm run lint
+npm run build
 ```
 
-## Architecture
+## Current limitations
 
-```
-                    ┌────────────────────┐
-   HTTP request ──▶ │  cmd/server/main   │ ── wires everything ──┐
-                    └────────────────────┘                        │
-                                                                 ▼
-   ┌────────────┐    ┌─────────────────────┐    ┌──────────────────────────┐
-   │  HTTP /    │──▶ │ TransferService     │──▶ │ eventstore.Store         │
-   │  gorilla   │    │  (internal/service) │    │  ┌─────────────────────┐ │
-   └────────────┘    └──────────┬──────────┘    │  │ MemoryStore (default)│ │
-                                │               │  │ PostgresStore (DSN)  │ │
-                ┌───────────────┼────────────────┤  └─────────────────────┘ │
-                ▼               ▼                ▼                          │
-        ┌──────────────┐ ┌──────────────┐ ┌──────────────────────┐           │
-        │ FeePolicy    │ │ TimeService  │ │ EventBus callback    │           │
-        │ (policy pkg) │ │ (policy pkg) │ │ → TransferCompleted  │           │
-        └──────────────┘ └──────────────┘ └──────────────────────┘           │
-                                                       │                     │
-                                                       ▼                     │
-                                              ┌──────────────────────┐       │
-                                              │ MemoryAccountRepo    │◀──────┘
-                                              │  (replays events)    │
-                                              └──────────────────────┘
-```
-
-### Dependency direction
-
-All dependencies point inward toward `internal/domain`:
-
-- `domain` defines the interfaces (`AccountRepository`, `FeePolicy`, `TimeService`, `TransferService`) and the entities (`Account`, `Event`).
-- `service` depends on `domain` and the `eventstore.Store` interface.
-- `eventstore` (memory + Postgres) depends on `domain`.
-- `httpapi` owns the HTTP transport and calls domain services plus the event store's read operations.
-- `repository`, `policy`, and `eventbus` depend on `domain`.
-- `cmd/server` depends on everything to wire the graph.
-
-This keeps the domain free of infrastructure concerns and lets the store be swapped without service-layer changes.
-
-### Transfer flow
-
-1. Validate `amount ≥ 1.0` (otherwise `ErrInvalidTransferAmount`).
-2. Check `timeService.IsServiceAvailable(time.Now())` (otherwise `ErrOutOfService`).
-3. Load both aggregates' event streams via `eventStore.Load`.
-4. Replay each into an `Account` via `domain.ReplayAccount` to derive current state.
-5. Compute fee with `FeePolicy.CalculateFee(amount)`; check `source.balance ≥ amount + fee` (otherwise `InsufficientFundsError`).
-6. Append `MoneyDebited` events for fee (if any) and amount to the source's stream.
-7. Append a `MoneyCredited` event for the amount to the destination's stream.
-8. Publish a `TransferCompletedEvent` via the EventBus callback (integration event).
-9. Return a `TransferReceipt` with distinct initial/final snapshots.
-
-Optimistic concurrency is enforced by the store: an append with a stale `expectedVersion` returns `ErrConcurrencyConflict`. The service does not currently retry; surfacing the error to the caller is the simplest correct behavior at this stage.
-
-### Event types
-
-Stored events (per-account, used to rebuild state):
-
-| Type             | Trigger                                |
-| ---------------- | -------------------------------------- |
-| `AccountOpened`  | Seeding an account with initial balance. |
-| `MoneyDebited`   | Source-side transfer debit, fee, or account withdrawal. |
-| `MoneyCredited`  | Destination-side transfer credit or account deposit. |
-
-Integration event (publish-only, not stored):
-
-| Type                       | Trigger                                |
-| -------------------------- | -------------------------------------- |
-| `TransferCompletedEvent`   | Successful end of a transfer.          |
-
-## Pluggable policies
-
-`internal/policy/policies.go` ships three `FeePolicy` implementations:
-
-| Type                  | Behavior                            |
-| --------------------- | ----------------------------------- |
-| `ZeroFeePolicy`       | Always returns `0`. (default in `main.go`) |
-| `FlatFeePolicy`       | Returns a constant fee.             |
-| `VariableFeePolicy`   | Returns `amount * Percentage`.      |
-
-The `TimeService` is provided by `DefaultTimeService`, a simple boolean-flag implementation — useful for tests that need to simulate "service is closed."
-
-## Event bus
-
-`internal/eventbus/event_bus.go` is an in-process pub/sub:
-
-- `Subscribe(handler)` adds a handler under an `RWMutex`-protected slice.
-- `Publish(event)` logs the event and invokes each subscribed handler in its own goroutine.
-
-Handlers are fire-and-forget; there is no panic recovery or backpressure.
-
-## Known Limitations
-
-- **No optimistic-concurrency retry** — `ErrConcurrencyConflict` is returned to the caller. A production version would retry on conflict.
-- **Goroutine handlers** — event-bus subscribers run via `go handler(event)` with no panic recovery; a panicking subscriber crashes the process.
-- **No event upcasting or schema versioning** — old payloads must remain readable forever. Practical for now, but will need a versioning strategy as events evolve.
-
-## Possible Next Steps
-
-- Retry on `ErrConcurrencyConflict` in `TransferService` with bounded attempts.
-- Add a panic-recovery wrapper around event-bus subscribers.
-- Add a second projection (e.g., per-account transaction history).
-- Snapshots for replay performance once event streams grow long.
-- Integration tests against a real Postgres (the `migrate` CLI + a `t.Cleanup`-style teardown would make this easy).
+- A transfer appends to two account streams without a transaction spanning both appends. A debit can therefore succeed before a destination credit fails.
+- Money uses `float64`; production financial software should use integer minor units or a decimal representation.
+- Optimistic concurrency conflicts are returned to clients and are not retried.
+- The event bus is in-process and fire-and-forget, with no durable delivery, backpressure, or handler panic recovery.
+- Event payloads have no schema versioning or upcasting strategy.
+- Account reads replay the complete event stream; snapshots are not implemented.
 
 ## License
 
-Not specified.
+Licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
