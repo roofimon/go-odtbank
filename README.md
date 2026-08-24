@@ -1,6 +1,6 @@
 # go-odtbank
 
-A small Go HTTP service that supports money transfers and account deposits. The account ledger is **event-sourced**: account state is derived from an append-only event log, not mutated in place. Two interchangeable store implementations ship — in-memory and Postgres.
+A small Go HTTP service that supports money transfers, deposits, and withdrawals. The account ledger is **event-sourced**: account state is derived from an append-only event log, not mutated in place. Two interchangeable store implementations ship — in-memory and Postgres.
 
 ## Overview
 
@@ -13,7 +13,7 @@ A small Go HTTP service that supports money transfers and account deposits. The 
 - **Policy** encapsulates fee calculation and service-availability rules.
 - **Event bus** publishes a `TransferCompletedEvent` after each successful transfer (the integration event, distinct from the per-account stored events).
 
-The HTTP entry point wires dependencies and delegates transfer, deposit, account-list, and event-log routes to `internal/httpapi`.
+The HTTP entry point wires dependencies and delegates transfer, deposit, withdrawal, account-list, and event-log routes to `internal/httpapi`.
 
 ## Project Layout
 
@@ -36,8 +36,9 @@ The HTTP entry point wires dependencies and delegates transfer, deposit, account
     │   ├── events.go          # Event interface + AccountOpened / MoneyDebited / MoneyCredited
     │   └── interfaces.go      # AccountRepository, FeePolicy, TimeService, TransferService
     ├── service/
+    │   ├── deposit_service.go         # Deposit use case
     │   ├── transfer_service.go        # Core use case: load → replay → emit events
-    │   └── transfer_service_test.go   # Smoke test against in-memory store
+    │   └── withdraw_service.go        # Withdrawal use case
     ├── repository/
     │   └── memory_repo.go     # Thin projection over eventstore (replays on read)
     ├── policy/
@@ -54,8 +55,10 @@ The HTTP entry point wires dependencies and delegates transfer, deposit, account
 web/                           # Next.js (TS) browser dashboard
 ├── components/
 │   ├── accounts-table.tsx     # Account list with balances
+│   ├── deposit-form.tsx       # Account deposit form
 │   ├── event-log.tsx          # Per-aggregate event stream table
-│   └── transfer-form.tsx      # Money-transfer form
+│   ├── transfer-form.tsx      # Money-transfer form
+│   └── withdraw-form.tsx      # Account withdrawal form
 └── lib/
     ├── api.ts                 # Typed client for the Go backend
     ├── format.ts              # Money / date formatting helpers
@@ -246,6 +249,31 @@ Deposit at least `10.00` into an existing account.
 
 Amounts below `10.00` or non-finite amounts return `400`, unknown accounts return `404`, and optimistic-concurrency conflicts return `409`.
 
+### `POST /withdraw`
+
+Withdraw at least `10.00` from an existing account. The withdrawal may reduce the balance to zero but cannot exceed the available balance.
+
+**Request body** (`application/json`):
+
+```json
+{
+  "account_id": "acc1",
+  "amount": 10.0
+}
+```
+
+**Successful response** (`200 OK`, `application/json`):
+
+```json
+{
+  "InitialAccount": { "ID": "acc1", "Balance": 100.0 },
+  "FinalAccount": { "ID": "acc1", "Balance": 90.0 },
+  "WithdrawalAmount": 10.0
+}
+```
+
+Amounts below `10.00` or non-finite amounts return `400`, unknown accounts return `404`, concurrency conflicts return `409`, and insufficient funds return `422`.
+
 ### `GET /accounts`
 
 List all seeded accounts with their replayed balances.
@@ -279,7 +307,7 @@ The full event stream for one aggregate (the event-sourced source of truth).
 
 ## Web interface
 
-A Next.js (TypeScript) dashboard lives in `web/`. It reads accounts, shows each account's event log, and submits transfers and deposits. The backend exposes the endpoints above and permissive CORS so the browser app can reach it directly.
+A Next.js (TypeScript) dashboard lives in `web/`. It reads accounts, shows each account's event log, and submits transfers, deposits, and withdrawals. The backend exposes the endpoints above and permissive CORS so the browser app can reach it directly.
 
 ```bash
 # Terminal 1 — backend
@@ -299,6 +327,10 @@ curl -s -X POST http://localhost:8080/transfer \
   -d '{"amount": 25.0, "source_account_id": "acc1", "destination_account_id": "acc2"}'
 
 curl -s -X POST http://localhost:8080/deposit \
+  -H 'Content-Type: application/json' \
+  -d '{"amount": 10.0, "account_id": "acc1"}'
+
+curl -s -X POST http://localhost:8080/withdraw \
   -H 'Content-Type: application/json' \
   -d '{"amount": 10.0, "account_id": "acc1"}'
 ```
@@ -363,7 +395,7 @@ Stored events (per-account, used to rebuild state):
 | Type             | Trigger                                |
 | ---------------- | -------------------------------------- |
 | `AccountOpened`  | Seeding an account with initial balance. |
-| `MoneyDebited`   | Source-side debit (fee and/or amount). |
+| `MoneyDebited`   | Source-side transfer debit, fee, or account withdrawal. |
 | `MoneyCredited`  | Destination-side transfer credit or account deposit. |
 
 Integration event (publish-only, not stored):

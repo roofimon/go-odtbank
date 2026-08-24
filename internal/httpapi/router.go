@@ -18,6 +18,7 @@ type Dependencies struct {
 	Store           eventstore.Store
 	TransferService domain.TransferService
 	DepositService  domain.DepositService
+	WithdrawService domain.WithdrawService
 	CORSOrigins     string
 }
 
@@ -25,6 +26,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	router := mux.NewRouter()
 	router.HandleFunc("/transfer", handleTransfer(deps.TransferService)).Methods(http.MethodPost)
 	router.HandleFunc("/deposit", handleDeposit(deps.DepositService)).Methods(http.MethodPost)
+	router.HandleFunc("/withdraw", handleWithdraw(deps.WithdrawService)).Methods(http.MethodPost)
 	router.HandleFunc("/accounts", handleListAccounts(deps.Store)).Methods(http.MethodGet)
 	router.HandleFunc("/accounts/{id}/events", handleAccountEvents(deps.Store)).Methods(http.MethodGet)
 	return withCORS(router, deps.CORSOrigins)
@@ -67,6 +69,28 @@ func handleDeposit(depositService domain.DepositService) http.HandlerFunc {
 		}
 
 		receipt, err := depositService.Deposit(req.Amount, req.AccountID)
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, receipt)
+	}
+}
+
+type withdrawRequest struct {
+	Amount    float64 `json:"amount"`
+	AccountID string  `json:"account_id"`
+}
+
+func handleWithdraw(withdrawService domain.WithdrawService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req withdrawRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		receipt, err := withdrawService.Withdraw(req.Amount, req.AccountID)
 		if err != nil {
 			writeError(w, statusForError(err), err.Error())
 			return
@@ -142,7 +166,7 @@ func firstNonEmpty(values ...string) string {
 
 func statusForError(err error) int {
 	switch {
-	case errors.Is(err, domain.ErrInvalidTransferAmount), errors.Is(err, domain.ErrInvalidDepositAmount):
+	case errors.Is(err, domain.ErrInvalidTransferAmount), errors.Is(err, domain.ErrInvalidDepositAmount), errors.Is(err, domain.ErrInvalidWithdrawAmount):
 		return http.StatusBadRequest
 	case errors.Is(err, domain.ErrOutOfService):
 		return http.StatusServiceUnavailable

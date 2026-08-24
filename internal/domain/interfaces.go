@@ -26,9 +26,14 @@ type DepositService interface {
 	Deposit(amount float64, accountID string) (*DepositReceipt, error)
 }
 
+type WithdrawService interface {
+	Withdraw(amount float64, accountID string) (*WithdrawalReceipt, error)
+}
+
 var (
 	ErrAccountNotFound       = errors.New("account not found")
 	ErrInvalidTransferAmount = errors.New("invalid transfer amount")
 	ErrInvalidDepositAmount  = errors.New("invalid deposit amount")
+	ErrInvalidWithdrawAmount = errors.New("invalid withdrawal amount")
 	ErrOutOfService          = errors.New("service is out of service")
 )

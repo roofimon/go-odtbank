@@ -42,12 +42,14 @@ func main() {
 
 	transferService := service.NewTransferService(store, feePolicy, timeService, eventBusFunc)
 	depositService := service.NewDepositService(store)
+	withdrawService := service.NewWithdrawService(store)
 
 	// 3. Setup HTTP transport
 	handler := httpapi.NewRouter(httpapi.Dependencies{
 		Store:           store,
 		TransferService: transferService,
 		DepositService:  depositService,
+		WithdrawService: withdrawService,
 		CORSOrigins:     os.Getenv("CORS_ORIGINS"),
 	})
 

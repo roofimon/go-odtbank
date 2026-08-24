@@ -1,8 +1,13 @@
-export type Feature = "transfer" | "deposit" | "transaction-history";
+export type Feature =
+  | "transfer"
+  | "deposit"
+  | "withdraw"
+  | "transaction-history";
 
 const links: { id: Feature; label: string }[] = [
   { id: "transfer", label: "Transfer" },
   { id: "deposit", label: "Deposit" },
+  { id: "withdraw", label: "Withdraw" },
   { id: "transaction-history", label: "Transaction history" },
 ];
 

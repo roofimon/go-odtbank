@@ -41,6 +41,12 @@ type DepositReceipt struct {
 	DepositAmount  float64
 }
 
+type WithdrawalReceipt struct {
+	InitialAccount   *Account
+	FinalAccount     *Account
+	WithdrawalAmount float64
+}
+
 // TransferCompletedEvent is an integration-level event published after a
 // successful transfer. It is distinct from per-account stored events; downstream
 // listeners (audit, analytics) can subscribe to it without touching the event store.

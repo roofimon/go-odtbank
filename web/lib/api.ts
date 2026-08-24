@@ -4,6 +4,7 @@ import type {
   DepositReceipt,
   EventLogResponse,
   TransferReceipt,
+  WithdrawalReceipt,
 } from "./types";
 
 export const API_URL =
@@ -79,6 +80,17 @@ export function deposit(
 ): Promise<DepositReceipt> {
   return request<DepositReceipt>(
     "/deposit",
+    { method: "POST" },
+    JSON.stringify({ amount, account_id: accountId }),
+  );
+}
+
+export function withdraw(
+  amount: number,
+  accountId: string,
+): Promise<WithdrawalReceipt> {
+  return request<WithdrawalReceipt>(
+    "/withdraw",
     { method: "POST" },
     JSON.stringify({ amount, account_id: accountId }),
   );

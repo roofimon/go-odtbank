@@ -31,6 +31,12 @@ export type DepositReceipt = {
   DepositAmount: number;
 };
 
+export type WithdrawalReceipt = {
+  InitialAccount: AccountRef;
+  FinalAccount: AccountRef;
+  WithdrawalAmount: number;
+};
+
 export type EventLogResponse = {
   aggregate_id: string;
   events: StoredEvent[];

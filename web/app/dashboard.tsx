@@ -9,6 +9,7 @@ import {
   type Feature,
 } from "../components/navigation-menu";
 import { TransferForm } from "../components/transfer-form";
+import { WithdrawForm } from "../components/withdraw-form";
 import { getAccounts, getEvents } from "../lib/api";
 import type { Account, EventLogResponse } from "../lib/types";
 
@@ -74,6 +75,10 @@ export default function Dashboard({
       title: "Deposit funds",
       description: "Add at least 10.00 to a specific account.",
     },
+    withdraw: {
+      title: "Withdraw funds",
+      description: "Remove at least 10.00 without exceeding the account balance.",
+    },
     "transaction-history": {
       title: "Transaction history",
       description: "Select an account and inspect its complete event history.",
@@ -138,6 +143,15 @@ export default function Dashboard({
           {activeFeature === "deposit" && (
             <section aria-label="Deposit funds">
               <DepositForm
+                accounts={accounts}
+                onCompleted={(id) => refresh(id)}
+              />
+            </section>
+          )}
+
+          {activeFeature === "withdraw" && (
+            <section aria-label="Withdraw funds">
+              <WithdrawForm
                 accounts={accounts}
                 onCompleted={(id) => refresh(id)}
               />
