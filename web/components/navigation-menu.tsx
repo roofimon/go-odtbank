@@ -1,12 +1,10 @@
 export type Feature =
-  | "onboarding"
   | "transfer"
   | "deposit"
   | "withdraw"
   | "transaction-history";
 
 const links: { id: Feature; label: string }[] = [
-  { id: "onboarding", label: "Onboarding" },
   { id: "transfer", label: "Transfer" },
   { id: "deposit", label: "Deposit" },
   { id: "withdraw", label: "Withdraw" },
@@ -16,9 +14,10 @@ const links: { id: Feature; label: string }[] = [
 type Props = {
   activeFeature: Feature;
   onSelect: (feature: Feature) => void;
+  onLogout: () => void;
 };
 
-export function NavigationMenu({ activeFeature, onSelect }: Props) {
+export function NavigationMenu({ activeFeature, onSelect, onLogout }: Props) {
   return (
     <aside className="border-b border-border bg-surface lg:sticky lg:top-0 lg:h-screen lg:border-b-0 lg:border-r">
       <div className="mx-auto flex max-w-6xl items-center gap-6 px-4 py-4 lg:h-full lg:w-64 lg:flex-col lg:items-stretch lg:px-5 lg:py-6">
@@ -67,6 +66,7 @@ export function NavigationMenu({ activeFeature, onSelect }: Props) {
         <div className="hidden rounded-lg border border-border bg-surface-2 p-3 text-xs text-text-2 lg:block">
           Account state is rebuilt from the append-only event log.
         </div>
+        <button type="button" onClick={onLogout} className="shrink-0 rounded-lg border border-border-strong px-3 py-2 text-left text-sm font-medium text-text-2 hover:bg-surface-2">Log out</button>
       </div>
     </aside>
   );

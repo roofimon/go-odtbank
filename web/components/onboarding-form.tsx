@@ -1,11 +1,10 @@
 "use client";
 
 import { FormEvent, useState, type InputHTMLAttributes } from "react";
+import { useRouter } from "next/navigation";
 import { onboardCustomer } from "../lib/api";
 import { formatMoney } from "../lib/format";
 import type { OnboardingReceipt, OnboardingRequest } from "../lib/types";
-
-type Props = { onViewAccount: (accountId: string) => void };
 
 const initialForm: OnboardingRequest = {
   legal_first_name: "",
@@ -14,6 +13,7 @@ const initialForm: OnboardingRequest = {
   nationality: "",
   email: "",
   phone: "",
+  password: "",
   residential_address: {
     line1: "", line2: "", city: "", state_or_province: "", postal_code: "", country: "",
   },
@@ -24,13 +24,15 @@ const initialForm: OnboardingRequest = {
 const inputClass =
   "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-text transition-colors placeholder:text-text-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20";
 
-export function OnboardingForm({ onViewAccount }: Props) {
+export function OnboardingForm() {
+  const router = useRouter();
   const [step, setStep] = useState(1);
   const [form, setForm] = useState(initialForm);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [receipt, setReceipt] = useState<OnboardingReceipt | null>(null);
   const [passportImage, setPassportImage] = useState<File | null>(null);
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
 
   function update<K extends keyof OnboardingRequest>(key: K, value: OnboardingRequest[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -47,9 +49,13 @@ export function OnboardingForm({ onViewAccount }: Props) {
       ? [form.legal_first_name, form.legal_last_name, form.date_of_birth, form.nationality,
           form.government_document.number, form.government_document.issuing_country]
       : [form.email, form.phone, form.residential_address.line1, form.residential_address.city,
-          form.residential_address.postal_code, form.residential_address.country];
+          form.residential_address.postal_code, form.residential_address.country, form.password, passwordConfirmation];
     if (required.some((value) => !value.trim()) || (step === 1 && !passportImage)) {
       setError("Complete all required fields before continuing.");
+      return;
+    }
+    if (step === 2 && form.password !== passwordConfirmation) {
+      setError("Passwords do not match.");
       return;
     }
     setError(null);
@@ -83,8 +89,8 @@ export function OnboardingForm({ onViewAccount }: Props) {
           <div><dt className="text-text-muted">Account ID</dt><dd className="mt-1 break-all font-mono text-text">{receipt.account_id}</dd></div>
           <div><dt className="text-text-muted">Opening balance</dt><dd className="mt-1 font-mono text-text">{formatMoney(receipt.balance)}</dd></div>
         </dl>
-        <button type="button" onClick={() => onViewAccount(receipt.account_id)} className="mt-5 rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white hover:bg-brand-hover">
-          View account
+        <button type="button" onClick={() => router.push(`/login?email=${encodeURIComponent(form.email)}`)} className="mt-5 rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white hover:bg-brand-hover">
+          Continue to login
         </button>
       </div>
     );
@@ -101,7 +107,7 @@ export function OnboardingForm({ onViewAccount }: Props) {
       </ol>
 
       {step === 1 && <IdentityStep form={form} update={update} updateDocument={updateDocument} passportImage={passportImage} setPassportImage={setPassportImage} setError={setError} />}
-      {step === 2 && <ContactStep form={form} update={update} updateAddress={updateAddress} />}
+      {step === 2 && <ContactStep form={form} update={update} updateAddress={updateAddress} passwordConfirmation={passwordConfirmation} setPasswordConfirmation={setPasswordConfirmation} />}
       {step === 3 && <ReviewStep form={form} update={update} />}
 
       {error && <p className="mt-4 rounded-lg border border-negative/30 bg-negative-soft px-3 py-2 text-sm text-negative">{error}</p>}
@@ -139,10 +145,12 @@ function IdentityStep({ form, update, updateDocument, passportImage, setPassport
   </div></fieldset>;
 }
 
-function ContactStep({ form, update, updateAddress }: StepProps & { updateAddress: (key: keyof OnboardingRequest["residential_address"], value: string) => void }) {
+function ContactStep({ form, update, updateAddress, passwordConfirmation, setPasswordConfirmation }: StepProps & { updateAddress: (key: keyof OnboardingRequest["residential_address"], value: string) => void; passwordConfirmation: string; setPasswordConfirmation: (value: string) => void }) {
   return <fieldset><legend className="mb-4 text-sm font-semibold text-text">Contact and residential address</legend><div className="grid gap-4 sm:grid-cols-2">
     <Field label="Email" type="email" value={form.email} onChange={(e) => update("email", e.target.value)} required />
     <Field label="Phone (E.164)" type="tel" value={form.phone} onChange={(e) => update("phone", e.target.value)} placeholder="+66812345678" required />
+    <Field label="Password" type="password" minLength={10} maxLength={128} value={form.password} onChange={(e) => update("password", e.target.value)} required />
+    <Field label="Confirm password" type="password" minLength={10} maxLength={128} value={passwordConfirmation} onChange={(e) => setPasswordConfirmation(e.target.value)} required />
     <Field label="Address line 1" value={form.residential_address.line1} onChange={(e) => updateAddress("line1", e.target.value)} required />
     <Field label="Address line 2 (optional)" value={form.residential_address.line2} onChange={(e) => updateAddress("line2", e.target.value)} />
     <Field label="City" value={form.residential_address.city} onChange={(e) => updateAddress("city", e.target.value)} required />

@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { getAccounts, getEvents } from "../lib/api";
 import Dashboard from "./dashboard";
 import type { Account, EventLogResponse } from "../lib/types";
@@ -13,10 +15,12 @@ export const dynamic = "force-dynamic";
 export default async function HomePage() {
   let accounts: Account[] = [];
   let backendError: string | null = null;
+  const cookieHeader = (await cookies()).toString();
 
   try {
-    accounts = await getAccounts();
+    accounts = await getAccounts(cookieHeader);
   } catch (err) {
+    if (err instanceof Error && "status" in err && err.status === 401) redirect("/login");
     backendError = err instanceof Error ? err.message : "Backend unavailable";
   }
 
@@ -24,7 +28,7 @@ export default async function HomePage() {
   let initialLog: EventLogResponse | null = null;
   if (firstId) {
     try {
-      initialLog = await getEvents(firstId);
+      initialLog = await getEvents(firstId, cookieHeader);
     } catch {
       initialLog = { aggregate_id: firstId, events: [] };
     }

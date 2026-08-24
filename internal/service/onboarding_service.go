@@ -33,6 +33,10 @@ func (s *OnboardingService) Onboard(command domain.OnboardingCommand) (*domain.O
 	if err != nil {
 		return nil, err
 	}
+	passwordHash, err := hashPassword(command.Password)
+	if err != nil {
+		return nil, fmt.Errorf("hash password: %w", err)
+	}
 
 	customerID, err := randomID("cus_")
 	if err != nil {
@@ -48,6 +52,7 @@ func (s *OnboardingService) Onboard(command domain.OnboardingCommand) (*domain.O
 		LegalFirstName: command.LegalFirstName, LegalLastName: command.LegalLastName,
 		DateOfBirth: birthDate, Nationality: command.Nationality,
 		Email: command.Email, Phone: command.Phone,
+		PasswordHash:       passwordHash,
 		ResidentialAddress: command.ResidentialAddress,
 		GovernmentDocument: command.GovernmentDocument,
 		PassportImage:      command.PassportImage,
@@ -98,6 +103,9 @@ func validateOnboarding(command domain.OnboardingCommand, now time.Time) (time.T
 		{"government_document.type", command.GovernmentDocument.Type},
 		{"government_document.number", command.GovernmentDocument.Number},
 		{"government_document.issuing_country", command.GovernmentDocument.IssuingCountry},
+	}
+	if len(command.Password) < 10 || len(command.Password) > 128 {
+		return time.Time{}, validationError("password", "must contain 10 to 128 characters")
 	}
 	for _, item := range required {
 		if item.value == "" {

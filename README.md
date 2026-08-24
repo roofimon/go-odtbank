@@ -1,12 +1,13 @@
 # go-odtbank
 
-An event-sourced banking demo built with Go, PostgreSQL, and Next.js. It supports transfers, deposits, withdrawals, account balances, and per-account transaction history.
+An event-sourced banking demo built with Go, PostgreSQL, and Next.js. It supports public onboarding, session-based login, transfers, deposits, withdrawals, balances, and per-account transaction history.
 
 Account balances are not stored as mutable rows. Each balance is rebuilt by replaying an append-only stream of `AccountOpened`, `MoneyCredited`, and `MoneyDebited` events.
 
 ## Features
 
-- Open an individual account through a three-step KYC onboarding journey.
+- Open an individual account through a public three-step KYC onboarding journey.
+- Log in with an email and password using an HTTP-only server-side session.
 - Transfer money between existing accounts (minimum `1.00`).
 - Deposit into an existing account (minimum `10.00`).
 - Withdraw from an existing account (minimum `10.00`, subject to available funds).
@@ -43,7 +44,7 @@ The domain package defines accounts, events, receipts, errors, and service contr
 ```text
 cmd/server/             Application entry point and dependency wiring
 internal/domain/        Domain types, events, errors, and interfaces
-internal/service/       Onboarding, transfer, deposit, and withdrawal use cases
+internal/service/       Authentication, onboarding, transfer, deposit, and withdrawal use cases
 internal/httpapi/       Router, handlers, DTOs, CORS, and HTTP error mapping
 internal/eventstore/    In-memory and PostgreSQL event stores
 internal/eventbus/      In-process TransferCompletedEvent publisher
@@ -76,7 +77,7 @@ The API starts at `http://localhost:8080`. When `DATABASE_URL` is unset, two acc
 | `acc1`  | `100.00`        |
 | `acc2`  | `50.00`         |
 
-Restarting the in-memory server resets all events.
+Restarting the in-memory server resets all events, customers, and sessions. The seeded accounts have no login credentials; use onboarding to create a customer account for the dashboard.
 
 ### Dashboard
 
@@ -88,7 +89,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. The navigation displays one feature at a time: Onboarding, Transfer, Deposit, Withdraw, or Transaction history.
+Open `http://localhost:3000/onboarding` to create an account, then log in at `http://localhost:3000/login`. Successful onboarding does not authenticate the customer. The protected dashboard displays Transfer, Deposit, Withdraw, or Transaction history.
 
 The browser calls `http://localhost:8080` by default. Override it when needed:
 
@@ -96,7 +97,7 @@ The browser calls `http://localhost:8080` by default. Override it when needed:
 NEXT_PUBLIC_API_URL='https://api.example.com' npm run dev
 ```
 
-The backend accepts browser requests through its CORS middleware. Set `CORS_ORIGINS` to a comma-separated origin allowlist; when unset, the middleware uses the request origin or `*`.
+The backend accepts credentialed browser requests through its CORS middleware. Set `CORS_ORIGINS` to a comma-separated origin allowlist; when unset, it reflects the request origin. Set `COOKIE_SECURE=true` when serving the API over HTTPS.
 
 ## PostgreSQL development
 
@@ -145,7 +146,7 @@ The `(aggregate_id, sequence)` primary key orders each stream and enforces optim
 
 ## API
 
-Responses and non-onboarding request bodies use `application/json`. Errors have the form:
+Responses and non-onboarding request bodies use `application/json`. `/onboarding` and `/login` are public; account and transaction endpoints require the `odtbank_session` cookie. Errors have the form:
 
 ```json
 {"error":"account not found"}
@@ -169,6 +170,7 @@ The request uses `multipart/form-data` with:
   "date_of_birth": "1990-12-10",
   "nationality": "GB",
   "email": "ada@example.com",
+  "password": "correct-horse-battery-staple",
   "phone": "+66812345678",
   "residential_address": {
     "line1": "1 Computing Lane",
@@ -189,7 +191,7 @@ The request uses `multipart/form-data` with:
 
 ```bash
 curl -s http://localhost:8080/onboarding \
-  -F 'payload={"legal_first_name":"Ada","legal_last_name":"Lovelace","date_of_birth":"1990-12-10","nationality":"GB","email":"ada@example.com","phone":"+66812345678","residential_address":{"line1":"1 Computing Lane","line2":"","city":"Bangkok","state_or_province":"","postal_code":"10110","country":"TH"},"government_document":{"type":"passport","number":"P123456","issuing_country":"GB"},"initial_deposit":25}' \
+  -F 'payload={"legal_first_name":"Ada","legal_last_name":"Lovelace","date_of_birth":"1990-12-10","nationality":"GB","email":"ada@example.com","password":"correct-horse-battery-staple","phone":"+66812345678","residential_address":{"line1":"1 Computing Lane","line2":"","city":"Bangkok","state_or_province":"","postal_code":"10110","country":"TH"},"government_document":{"type":"passport","number":"P123456","issuing_country":"GB"},"initial_deposit":25}' \
   -F 'passport_image=@passport.png;type=image/png'
 ```
 
@@ -204,7 +206,19 @@ Successful onboarding returns `201`:
 }
 ```
 
-The same normalized government document cannot be onboarded twice; duplicates return `409`. PostgreSQL onboarding requires migration `0002_customers`. The passport image is stored privately in the customer record and is never included in account events or read APIs.
+The same normalized email or government document cannot be onboarded twice; duplicates return `409`. PostgreSQL requires migrations `0002_customers` and `0003_auth`. The passport image and password hash are stored privately and never included in account events or read APIs.
+
+### Log in and out
+
+`POST /login` verifies customer credentials and sets an HTTP-only session cookie:
+
+```bash
+curl -s -c cookies.txt http://localhost:8080/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse-battery-staple"}'
+```
+
+Use `-b cookies.txt` on protected requests. `GET /me` returns the current customer and account IDs. `POST /logout` invalidates the session and clears the cookie.
 
 ### Transfer
 
@@ -212,6 +226,7 @@ The same normalized government document cannot be onboarded twice; duplicates re
 
 ```bash
 curl -s http://localhost:8080/transfer \
+  -b cookies.txt \
   -H 'Content-Type: application/json' \
   -d '{"amount":10,"source_account_id":"acc1","destination_account_id":"acc2"}'
 ```
@@ -219,9 +234,8 @@ curl -s http://localhost:8080/transfer \
 ```json
 {
   "InitialSourceAccount": {"ID":"acc1","Balance":100},
-  "InitialDestinationAccount": {"ID":"acc2","Balance":50},
   "FinalSourceAccount": {"ID":"acc1","Balance":90},
-  "FinalDestinationAccount": {"ID":"acc2","Balance":60},
+  "DestinationAccountID": "acc2",
   "TransferAmount": 10,
   "FeeAmount": 0
 }
@@ -235,6 +249,7 @@ The default wiring uses `ZeroFeePolicy`; flat and percentage fee policies are al
 
 ```bash
 curl -s http://localhost:8080/deposit \
+  -b cookies.txt \
   -H 'Content-Type: application/json' \
   -d '{"account_id":"acc1","amount":10}'
 ```
@@ -253,6 +268,7 @@ curl -s http://localhost:8080/deposit \
 
 ```bash
 curl -s http://localhost:8080/withdraw \
+  -b cookies.txt \
   -H 'Content-Type: application/json' \
   -d '{"account_id":"acc1","amount":10}'
 ```
@@ -269,7 +285,7 @@ A withdrawal may reduce the balance to exactly zero but cannot exceed the availa
 
 ### Read accounts
 
-`GET /accounts`
+`GET /accounts` returns only the authenticated customer's account. `GET /accounts/{id}/events` rejects access to any other account. Both require the session cookie.
 
 ```json
 {
@@ -297,6 +313,8 @@ A withdrawal may reduce the balance to exactly zero but cannot exceed the availa
 | Status | Meaning                                                         |
 | ------ | --------------------------------------------------------------- |
 | `400`  | Malformed JSON or an amount below the operation minimum.        |
+| `401`  | Login credentials or the session cookie are invalid.            |
+| `403`  | The authenticated customer does not own the requested account.  |
 | `404`  | The requested source, destination, or target account is absent. |
 | `409`  | A concurrent append occurred or the KYC document already exists. |
 | `422`  | The source or withdrawal account has insufficient funds.        |
@@ -339,9 +357,9 @@ npm run build
 
 ## Current limitations
 
-- KYC verification is simulated and immediately marked verified; there is no identity provider, document upload, sanctions screening, or manual review.
+- KYC verification is simulated and immediately marked verified; there is no identity provider, sanctions screening, or manual review.
 - Customer KYC is stored without application-level field encryption. Never submit real personal data to this demo.
-- There is no authentication or ownership authorization; the dashboard is shared.
+- Sessions have no rotation, device management, password reset, email verification, or rate limiting.
 - A transfer appends to two account streams without a transaction spanning both appends. A debit can therefore succeed before a destination credit fails.
 - Money uses `float64`; production financial software should use integer minor units or a decimal representation.
 - Optimistic concurrency conflicts are returned to clients and are not retried.

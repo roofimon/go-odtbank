@@ -3,6 +3,7 @@ package eventstore
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"go-odtbank/internal/domain"
 )
@@ -14,12 +15,14 @@ type MemoryStore struct {
 	mu        sync.RWMutex
 	streams   map[string][]domain.Event
 	customers map[string]domain.Customer
+	sessions  map[string]domain.Session
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		streams:   make(map[string][]domain.Event),
 		customers: make(map[string]domain.Customer),
+		sessions:  make(map[string]domain.Session),
 	}
 }
 
@@ -28,6 +31,9 @@ func (m *MemoryStore) CreateCustomerAccount(customer domain.Customer, opened dom
 	defer m.mu.Unlock()
 
 	for _, existing := range m.customers {
+		if existing.Email == customer.Email {
+			return domain.ErrCustomerAlreadyExists
+		}
 		if existing.GovernmentDocument.Type == customer.GovernmentDocument.Type &&
 			existing.GovernmentDocument.Number == customer.GovernmentDocument.Number &&
 			existing.GovernmentDocument.IssuingCountry == customer.GovernmentDocument.IssuingCountry {
@@ -45,7 +51,48 @@ func (m *MemoryStore) CreateCustomerAccount(customer domain.Customer, opened dom
 	return nil
 }
 
+func (m *MemoryStore) FindCustomerByEmail(email string) (*domain.Customer, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, customer := range m.customers {
+		if customer.Email == email {
+			copy := customer
+			return &copy, nil
+		}
+	}
+	return nil, domain.ErrInvalidCredentials
+}
+
+func (m *MemoryStore) CreateSession(session domain.Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions[session.TokenHash] = session
+	return nil
+}
+
+func (m *MemoryStore) FindSession(tokenHash string, now time.Time) (*domain.Principal, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	session, ok := m.sessions[tokenHash]
+	if !ok || !session.ExpiresAt.After(now) {
+		return nil, domain.ErrUnauthorized
+	}
+	customer, ok := m.customers[session.CustomerID]
+	if !ok {
+		return nil, domain.ErrUnauthorized
+	}
+	return &domain.Principal{CustomerID: customer.ID, AccountID: customer.AccountID, Email: customer.Email}, nil
+}
+
+func (m *MemoryStore) DeleteSession(tokenHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sessions, tokenHash)
+	return nil
+}
+
 var _ domain.OnboardingStore = (*MemoryStore)(nil)
+var _ domain.AuthStore = (*MemoryStore)(nil)
 
 // Append stores the event at the next sequence position for its aggregate,
 // provided expectedVersion matches the current stream length.

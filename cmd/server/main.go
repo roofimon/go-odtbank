@@ -48,6 +48,11 @@ func main() {
 		log.Fatal("configured store does not support onboarding")
 	}
 	onboardingService := service.NewOnboardingService(onboardingStore)
+	authStore, ok := store.(domain.AuthStore)
+	if !ok {
+		log.Fatal("configured store does not support authentication")
+	}
+	authService := service.NewAuthService(authStore)
 
 	// 3. Setup HTTP transport
 	handler := httpapi.NewRouter(httpapi.Dependencies{
@@ -56,6 +61,8 @@ func main() {
 		DepositService:    depositService,
 		WithdrawService:   withdrawService,
 		OnboardingService: onboardingService,
+		AuthService:       authService,
+		CookieSecure:      os.Getenv("COOKIE_SECURE") == "true",
 		CORSOrigins:       os.Getenv("CORS_ORIGINS"),
 	})
 

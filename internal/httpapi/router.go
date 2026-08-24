@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,17 +22,26 @@ type Dependencies struct {
 	DepositService    domain.DepositService
 	WithdrawService   domain.WithdrawService
 	OnboardingService domain.OnboardingService
+	AuthService       domain.AuthService
+	CookieSecure      bool
 	CORSOrigins       string
 }
 
 func NewRouter(deps Dependencies) http.Handler {
 	router := mux.NewRouter()
-	router.HandleFunc("/transfer", handleTransfer(deps.TransferService)).Methods(http.MethodPost)
-	router.HandleFunc("/deposit", handleDeposit(deps.DepositService)).Methods(http.MethodPost)
-	router.HandleFunc("/withdraw", handleWithdraw(deps.WithdrawService)).Methods(http.MethodPost)
 	router.HandleFunc("/onboarding", handleOnboarding(deps.OnboardingService)).Methods(http.MethodPost)
-	router.HandleFunc("/accounts", handleListAccounts(deps.Store)).Methods(http.MethodGet)
-	router.HandleFunc("/accounts/{id}/events", handleAccountEvents(deps.Store)).Methods(http.MethodGet)
+	router.HandleFunc("/login", handleLogin(deps.AuthService, deps.CookieSecure)).Methods(http.MethodPost)
+	protect := func(handler http.HandlerFunc) http.HandlerFunc { return handler }
+	if deps.AuthService != nil {
+		protect = func(handler http.HandlerFunc) http.HandlerFunc { return requireAuth(deps.AuthService, handler) }
+	}
+	router.HandleFunc("/logout", protect(handleLogout(deps.AuthService, deps.CookieSecure))).Methods(http.MethodPost)
+	router.HandleFunc("/me", protect(handleMe())).Methods(http.MethodGet)
+	router.HandleFunc("/transfer", protect(handleTransfer(deps.TransferService))).Methods(http.MethodPost)
+	router.HandleFunc("/deposit", protect(handleDeposit(deps.DepositService))).Methods(http.MethodPost)
+	router.HandleFunc("/withdraw", protect(handleWithdraw(deps.WithdrawService))).Methods(http.MethodPost)
+	router.HandleFunc("/accounts", protect(handleListAccounts(deps.Store))).Methods(http.MethodGet)
+	router.HandleFunc("/accounts/{id}/events", protect(handleAccountEvents(deps.Store))).Methods(http.MethodGet)
 	return withCORS(router, deps.CORSOrigins)
 }
 
@@ -48,13 +58,23 @@ func handleTransfer(transferService domain.TransferService) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
+		if !authorizedAccount(r, req.SourceID) {
+			writeError(w, http.StatusForbidden, domain.ErrForbidden.Error())
+			return
+		}
 
 		receipt, err := transferService.Transfer(req.Amount, req.SourceID, req.DestID)
 		if err != nil {
 			writeError(w, statusForError(err), err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, receipt)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"InitialSourceAccount": receipt.InitialSourceAccount,
+			"FinalSourceAccount":   receipt.FinalSourceAccount,
+			"DestinationAccountID": req.DestID,
+			"TransferAmount":       receipt.TransferAmount,
+			"FeeAmount":            receipt.FeeAmount,
+		})
 	}
 }
 
@@ -68,6 +88,10 @@ func handleDeposit(depositService domain.DepositService) http.HandlerFunc {
 		var req depositRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if !authorizedAccount(r, req.AccountID) {
+			writeError(w, http.StatusForbidden, domain.ErrForbidden.Error())
 			return
 		}
 
@@ -92,6 +116,10 @@ func handleWithdraw(withdrawService domain.WithdrawService) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
+		if !authorizedAccount(r, req.AccountID) {
+			writeError(w, http.StatusForbidden, domain.ErrForbidden.Error())
+			return
+		}
 
 		receipt, err := withdrawService.Withdraw(req.Amount, req.AccountID)
 		if err != nil {
@@ -109,6 +137,7 @@ type onboardingRequest struct {
 	Nationality        string  `json:"nationality"`
 	Email              string  `json:"email"`
 	Phone              string  `json:"phone"`
+	Password           string  `json:"password"`
 	InitialDeposit     float64 `json:"initial_deposit"`
 	ResidentialAddress struct {
 		Line1           string `json:"line1"`
@@ -151,7 +180,7 @@ func handleOnboarding(onboardingService domain.OnboardingService) http.HandlerFu
 		command := domain.OnboardingCommand{
 			LegalFirstName: req.LegalFirstName, LegalLastName: req.LegalLastName,
 			DateOfBirth: req.DateOfBirth, Nationality: req.Nationality,
-			Email: req.Email, Phone: req.Phone, InitialDeposit: req.InitialDeposit,
+			Email: req.Email, Phone: req.Phone, Password: req.Password, InitialDeposit: req.InitialDeposit,
 			ResidentialAddress: domain.ResidentialAddress{
 				Line1: req.ResidentialAddress.Line1, Line2: req.ResidentialAddress.Line2,
 				City: req.ResidentialAddress.City, StateOrProvince: req.ResidentialAddress.StateOrProvince,
@@ -178,7 +207,16 @@ func handleOnboarding(onboardingService domain.OnboardingService) http.HandlerFu
 }
 
 func handleListAccounts(store eventstore.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if principal := principalFromRequest(r); principal != nil {
+			events, err := store.Load(principal.AccountID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"accounts": []accountDTO{{ID: principal.AccountID, Balance: domain.ReplayAccount(principal.AccountID, events).Balance, EventCount: len(events)}}})
+			return
+		}
 		accounts, err := listAccounts(store)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -191,6 +229,10 @@ func handleListAccounts(store eventstore.Store) http.HandlerFunc {
 func handleAccountEvents(store eventstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := mux.Vars(r)["id"]
+		if !authorizedAccount(r, id) {
+			writeError(w, http.StatusForbidden, domain.ErrForbidden.Error())
+			return
+		}
 		events, err := store.Load(id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -203,13 +245,80 @@ func handleAccountEvents(store eventstore.Store) http.HandlerFunc {
 	}
 }
 
+const sessionCookie = "odtbank_session"
+
+type principalContextKey struct{}
+
+func requireAuth(auth domain.AuthService, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(sessionCookie)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, domain.ErrUnauthorized.Error())
+			return
+		}
+		principal, err := auth.Authenticate(cookie.Value)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, domain.ErrUnauthorized.Error())
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
+	}
+}
+
+func principalFromRequest(r *http.Request) *domain.Principal {
+	principal, _ := r.Context().Value(principalContextKey{}).(*domain.Principal)
+	return principal
+}
+
+func authorizedAccount(r *http.Request, accountID string) bool {
+	principal := principalFromRequest(r)
+	return principal == nil || principal.AccountID == accountID
+}
+
+func handleLogin(auth domain.AuthService, secure bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		token, principal, err := auth.Login(req.Email, req.Password)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, domain.ErrInvalidCredentials.Error())
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: 86400, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+		writeJSON(w, http.StatusOK, principal)
+	}
+}
+
+func handleLogout(auth domain.AuthService, secure bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cookie, err := r.Cookie(sessionCookie); err == nil {
+			_ = auth.Logout(cookie.Value)
+		}
+		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleMe() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, principalFromRequest(r)) }
+}
+
 func withCORS(next http.Handler, corsOrigins string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		origin := req.Header.Get("Origin")
-		if corsOrigins != "" && !strings.Contains(corsOrigins, origin) {
+		if origin != "" && corsOrigins != "" && !originAllowed(corsOrigins, origin) {
 			origin = ""
 		}
-		w.Header().Set("Access-Control-Allow-Origin", firstNonEmpty(origin, "*"))
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -219,6 +328,15 @@ func withCORS(next http.Handler, corsOrigins string) http.Handler {
 		}
 		next.ServeHTTP(w, req)
 	})
+}
+
+func originAllowed(allowlist, origin string) bool {
+	for _, allowed := range strings.Split(allowlist, ",") {
+		if strings.TrimSpace(allowed) == origin {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -231,15 +349,6 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return "*"
 }
 
 func statusForError(err error) int {

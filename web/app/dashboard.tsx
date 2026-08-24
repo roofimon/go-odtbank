@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AccountsTable } from "../components/accounts-table";
 import { EventLog } from "../components/event-log";
 import { DepositForm } from "../components/deposit-form";
@@ -10,8 +11,7 @@ import {
 } from "../components/navigation-menu";
 import { TransferForm } from "../components/transfer-form";
 import { WithdrawForm } from "../components/withdraw-form";
-import { OnboardingForm } from "../components/onboarding-form";
-import { getAccounts, getEvents } from "../lib/api";
+import { getAccounts, getEvents, logout } from "../lib/api";
 import type { Account, EventLogResponse } from "../lib/types";
 
 type Props = {
@@ -25,6 +25,7 @@ export default function Dashboard({
   initialLog,
   initialError,
 }: Props) {
+  const router = useRouter();
   const [accounts, setAccounts] = useState<Account[]>(initialAccounts);
   const [selectedId, setSelectedId] = useState<string | null>(
     initialAccounts[0]?.id ?? null,
@@ -68,10 +69,6 @@ export default function Dashboard({
 
   const isUnreachable = error?.startsWith("Cannot reach backend") ?? false;
   const featureHeading = {
-    onboarding: {
-      title: "Open an account",
-      description: "Complete identity verification and create a new account.",
-    },
     transfer: {
       title: "Transfer funds",
       description: "Move money securely between existing accounts.",
@@ -95,6 +92,7 @@ export default function Dashboard({
       <NavigationMenu
         activeFeature={activeFeature}
         onSelect={setActiveFeature}
+        onLogout={async () => { await logout(); router.push("/login"); router.refresh(); }}
       />
 
       <main className="min-w-0 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
@@ -141,17 +139,6 @@ export default function Dashboard({
               <TransferForm
                 accounts={accounts}
                 onCompleted={() => refresh(selectedId)}
-              />
-            </section>
-          )}
-
-          {activeFeature === "onboarding" && (
-            <section aria-label="Customer onboarding">
-              <OnboardingForm
-                onViewAccount={async (id) => {
-                  await refresh(id);
-                  setActiveFeature("transaction-history");
-                }}
               />
             </section>
           )}

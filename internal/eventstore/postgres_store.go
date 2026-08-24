@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -44,13 +45,13 @@ func (s *PostgresStore) CreateCustomerAccount(customer domain.Customer, opened d
 	_, err = tx.Exec(ctx, `
 		INSERT INTO customers (
 			id, account_id, legal_first_name, legal_last_name, date_of_birth,
-			nationality, email, phone, address_line1, address_line2, city,
+			nationality, email, phone, password_hash, address_line1, address_line2, city,
 			state_or_province, postal_code, country, document_type,
 			document_number, document_issuing_country, passport_image,
 			passport_image_mime, kyc_status, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 	`, customer.ID, customer.AccountID, customer.LegalFirstName, customer.LegalLastName,
-		customer.DateOfBirth, customer.Nationality, customer.Email, customer.Phone,
+		customer.DateOfBirth, customer.Nationality, customer.Email, customer.Phone, customer.PasswordHash,
 		customer.ResidentialAddress.Line1, customer.ResidentialAddress.Line2,
 		customer.ResidentialAddress.City, customer.ResidentialAddress.StateOrProvince,
 		customer.ResidentialAddress.PostalCode, customer.ResidentialAddress.Country,
@@ -81,6 +82,56 @@ func (s *PostgresStore) CreateCustomerAccount(customer domain.Customer, opened d
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("eventstore: commit onboarding: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) FindCustomerByEmail(email string) (*domain.Customer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var customer domain.Customer
+	err := s.pool.QueryRow(ctx, `SELECT id, account_id, email, password_hash FROM customers WHERE lower(email)=lower($1)`, email).
+		Scan(&customer.ID, &customer.AccountID, &customer.Email, &customer.PasswordHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrInvalidCredentials
+	}
+	if err != nil {
+		return nil, fmt.Errorf("eventstore: find customer: %w", err)
+	}
+	return &customer, nil
+}
+
+func (s *PostgresStore) CreateSession(session domain.Session) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `INSERT INTO sessions (token_hash, customer_id, account_id, expires_at) VALUES ($1,$2,$3,$4)`, session.TokenHash, session.CustomerID, session.AccountID, session.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("eventstore: create session: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) FindSession(tokenHash string, now time.Time) (*domain.Principal, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var principal domain.Principal
+	err := s.pool.QueryRow(ctx, `SELECT s.customer_id, s.account_id, c.email FROM sessions s JOIN customers c ON c.id=s.customer_id WHERE s.token_hash=$1 AND s.expires_at>$2`, tokenHash, now).
+		Scan(&principal.CustomerID, &principal.AccountID, &principal.Email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrUnauthorized
+	}
+	if err != nil {
+		return nil, fmt.Errorf("eventstore: find session: %w", err)
+	}
+	return &principal, nil
+}
+
+func (s *PostgresStore) DeleteSession(tokenHash string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token_hash=$1`, tokenHash)
+	if err != nil {
+		return fmt.Errorf("eventstore: delete session: %w", err)
 	}
 	return nil
 }
@@ -213,3 +264,4 @@ func decodeEvent(aggregateID, eventType string, payload []byte) (domain.Event, e
 // Compile-time check that PostgresStore satisfies Store.
 var _ Store = (*PostgresStore)(nil)
 var _ domain.OnboardingStore = (*PostgresStore)(nil)
+var _ domain.AuthStore = (*PostgresStore)(nil)

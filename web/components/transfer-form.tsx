@@ -20,8 +20,8 @@ const inputClass =
   "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-text transition-colors placeholder:text-text-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20";
 
 export function TransferForm({ accounts, onCompleted }: Props) {
-  const [sourceId, setSourceId] = useState(accounts[0]?.id ?? "");
-  const [destId, setDestId] = useState(accounts[1]?.id ?? "");
+  const sourceId = accounts[0]?.id ?? "";
+  const [destId, setDestId] = useState("");
   const [amount, setAmount] = useState("");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
 
@@ -55,32 +55,22 @@ export function TransferForm({ accounts, onCompleted }: Props) {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <label className="space-y-1.5">
           <span className="text-xs font-medium text-text-2">From</span>
-          <select
+          <input
             value={sourceId}
-            onChange={(e) => setSourceId(e.target.value)}
+            readOnly
             className={inputClass}
-          >
-            {accounts.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.id} ({formatMoney(a.balance)})
-              </option>
-            ))}
-          </select>
+          />
         </label>
 
         <label className="space-y-1.5">
           <span className="text-xs font-medium text-text-2">To</span>
-          <select
+          <input
             value={destId}
             onChange={(e) => setDestId(e.target.value)}
+            placeholder="Destination account ID"
+            required
             className={inputClass}
-          >
-            {accounts.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.id} ({formatMoney(a.balance)})
-              </option>
-            ))}
-          </select>
+          />
         </label>
 
         <label className="space-y-1.5">
@@ -103,7 +93,7 @@ export function TransferForm({ accounts, onCompleted }: Props) {
           type="submit"
           disabled={
             status.kind === "loading" ||
-            accounts.length < 2 ||
+            accounts.length < 1 ||
             sourceId === destId
           }
           className="rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-40"
@@ -130,11 +120,7 @@ export function TransferForm({ accounts, onCompleted }: Props) {
             from={r.InitialSourceAccount}
             to={r.FinalSourceAccount}
           />
-          <Result
-            label="Destination"
-            from={r.InitialDestinationAccount}
-            to={r.FinalDestinationAccount}
-          />
+          <div><div className="text-xs text-text-muted">Destination</div><div className="break-all font-mono text-text">{r.DestinationAccountID}</div></div>
           <Result
             label="Transferred"
             from={{ ID: "", Balance: 0 }}

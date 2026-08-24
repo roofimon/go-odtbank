@@ -26,6 +26,7 @@ func TestOnboardingEndToEnd(t *testing.T) {
 		"legal_first_name": "Ada", "legal_last_name": "Lovelace",
 		"date_of_birth": "1990-12-10", "nationality": "GB",
 		"email": "ada@example.com", "phone": "+66812345678",
+		"password":        "correct-horse-battery-staple",
 		"initial_deposit": 25,
 		"residential_address": map[string]any{
 			"line1": "1 Computing Lane", "city": "Bangkok",

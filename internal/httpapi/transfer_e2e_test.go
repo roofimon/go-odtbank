@@ -50,13 +50,19 @@ func TestTransferEndToEnd(t *testing.T) {
 		t.Fatalf("POST /transfer: %v", err)
 	}
 
-	var receipt domain.TransferReceipt
+	var receipt struct {
+		InitialSourceAccount *domain.Account
+		FinalSourceAccount   *domain.Account
+		DestinationAccountID string
+		TransferAmount       float64
+		FeeAmount            float64
+	}
 	decodeResponse(t, response, http.StatusOK, &receipt)
 	if receipt.InitialSourceAccount.Balance != 100 || receipt.FinalSourceAccount.Balance != 75 {
 		t.Errorf("source balances = %v -> %v, want 100 -> 75", receipt.InitialSourceAccount.Balance, receipt.FinalSourceAccount.Balance)
 	}
-	if receipt.InitialDestinationAccount.Balance != 50 || receipt.FinalDestinationAccount.Balance != 75 {
-		t.Errorf("destination balances = %v -> %v, want 50 -> 75", receipt.InitialDestinationAccount.Balance, receipt.FinalDestinationAccount.Balance)
+	if receipt.DestinationAccountID != "acc2" {
+		t.Errorf("destination account = %q, want acc2", receipt.DestinationAccountID)
 	}
 	if completedEvent.Amount != 25 || completedEvent.SourceAccountID != "acc1" || completedEvent.DestinationAccountID != "acc2" {
 		t.Errorf("completed event = %+v", completedEvent)

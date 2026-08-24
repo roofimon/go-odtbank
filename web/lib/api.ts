@@ -5,6 +5,7 @@ import type {
   EventLogResponse,
   OnboardingReceipt,
   OnboardingRequest,
+  Principal,
   TransferReceipt,
   WithdrawalReceipt,
 } from "./types";
@@ -33,6 +34,7 @@ async function request<T>(
       ...init,
       body: payload,
       headers: { "Content-Type": "application/json", ...init?.headers },
+      credentials: "include",
       cache: "no-store",
     });
   } catch {
@@ -50,13 +52,14 @@ async function request<T>(
   return json as T;
 }
 
-export function getAccounts(): Promise<Account[]> {
-  return request<AccountsWithMeta>("/accounts").then((r) => r.accounts);
+export function getAccounts(cookie?: string): Promise<Account[]> {
+  return request<AccountsWithMeta>("/accounts", cookie ? { headers: { Cookie: cookie } } : undefined).then((r) => r.accounts);
 }
 
-export function getEvents(aggregateId: string): Promise<EventLogResponse> {
+export function getEvents(aggregateId: string, cookie?: string): Promise<EventLogResponse> {
   return request<EventLogResponse>(
     `/accounts/${encodeURIComponent(aggregateId)}/events`,
+    cookie ? { headers: { Cookie: cookie } } : undefined,
   );
 }
 
@@ -105,11 +108,19 @@ export function onboardCustomer(
   const form = new FormData();
   form.append("payload", JSON.stringify(payload));
   form.append("passport_image", passportImage);
-  return fetch(`${API_URL}/onboarding`, { method: "POST", body: form, cache: "no-store" })
+  return fetch(`${API_URL}/onboarding`, { method: "POST", body: form, cache: "no-store", credentials: "include" })
     .catch(() => { throw new ApiError(0, `Cannot reach backend at ${API_URL}`); })
     .then(async (response) => {
       const json = (await response.json().catch(() => null)) as (OnboardingReceipt & { error?: string }) | null;
       if (!response.ok) throw new ApiError(response.status, json?.error ?? response.statusText);
       return json as OnboardingReceipt;
     });
+}
+
+export function login(email: string, password: string): Promise<Principal> {
+  return request<Principal>("/login", { method: "POST" }, JSON.stringify({ email, password }));
+}
+
+export function logout(): Promise<void> {
+  return request<void>("/logout", { method: "POST" });
 }

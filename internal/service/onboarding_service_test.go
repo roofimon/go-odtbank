@@ -14,6 +14,7 @@ func validOnboardingCommand() domain.OnboardingCommand {
 		LegalFirstName: "Ada", LegalLastName: "Lovelace",
 		DateOfBirth: "1990-12-10", Nationality: "GB",
 		Email: "ada@example.com", Phone: "+66812345678",
+		Password: "correct-horse-battery-staple",
 		ResidentialAddress: domain.ResidentialAddress{
 			Line1: "1 Computing Lane", City: "Bangkok", PostalCode: "10110", Country: "TH",
 		},

@@ -18,9 +18,8 @@ export type AccountRef = {
 
 export type TransferReceipt = {
   InitialSourceAccount: AccountRef;
-  InitialDestinationAccount: AccountRef;
   FinalSourceAccount: AccountRef;
-  FinalDestinationAccount: AccountRef;
+  DestinationAccountID: string;
   TransferAmount: number;
   FeeAmount: number;
 };
@@ -53,6 +52,7 @@ export type OnboardingRequest = {
   nationality: string;
   email: string;
   phone: string;
+  password: string;
   residential_address: {
     line1: string;
     line2: string;
@@ -68,6 +68,8 @@ export type OnboardingRequest = {
   };
   initial_deposit: number;
 };
+
+export type Principal = { customer_id: string; account_id: string; email: string };
 
 export type OnboardingReceipt = {
   customer_id: string;

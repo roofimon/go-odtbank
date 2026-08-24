@@ -27,6 +27,7 @@ type OnboardingCommand struct {
 	Nationality        string
 	Email              string
 	Phone              string
+	Password           string
 	ResidentialAddress ResidentialAddress
 	GovernmentDocument GovernmentDocument
 	PassportImage      []byte
@@ -42,6 +43,7 @@ type Customer struct {
 	Nationality        string
 	Email              string
 	Phone              string
+	PasswordHash       string
 	ResidentialAddress ResidentialAddress
 	GovernmentDocument GovernmentDocument
 	PassportImage      []byte
