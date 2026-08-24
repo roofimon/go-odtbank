@@ -1,10 +1,12 @@
 export type Feature =
+  | "onboarding"
   | "transfer"
   | "deposit"
   | "withdraw"
   | "transaction-history";
 
 const links: { id: Feature; label: string }[] = [
+  { id: "onboarding", label: "Onboarding" },
   { id: "transfer", label: "Transfer" },
   { id: "deposit", label: "Deposit" },
   { id: "withdraw", label: "Withdraw" },

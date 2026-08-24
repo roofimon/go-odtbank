@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +21,15 @@ type stubDepositService struct {
 type stubWithdrawService struct {
 	receipt *domain.WithdrawalReceipt
 	err     error
+}
+
+type stubOnboardingService struct {
+	receipt *domain.OnboardingReceipt
+	err     error
+}
+
+func (s stubOnboardingService) Onboard(domain.OnboardingCommand) (*domain.OnboardingReceipt, error) {
+	return s.receipt, s.err
 }
 
 func (s stubWithdrawService) Withdraw(float64, string) (*domain.WithdrawalReceipt, error) {
@@ -128,4 +139,66 @@ func TestHandleWithdrawRejectsInvalidJSON(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", res.Code)
 	}
+}
+
+func TestHandleOnboardingSuccess(t *testing.T) {
+	svc := stubOnboardingService{receipt: &domain.OnboardingReceipt{
+		CustomerID: "cus_1", AccountID: "acc_1", KYCStatus: "verified", Balance: 25,
+	}}
+	response := httptest.NewRecorder()
+	request := onboardingMultipartRequest(t, `{"legal_first_name":"Ada"}`)
+	handleOnboarding(svc).ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"account_id":"acc_1"`) {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandleOnboardingValidationError(t *testing.T) {
+	svc := stubOnboardingService{err: &domain.OnboardingValidationError{Field: "email", Message: "email must be valid"}}
+	response := httptest.NewRecorder()
+	request := onboardingMultipartRequest(t, `{}`)
+	handleOnboarding(svc).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"field":"email"`) {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandleOnboardingRejectsInvalidJSON(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := onboardingMultipartRequest(t, `{`)
+	handleOnboarding(stubOnboardingService{}).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.Code)
+	}
+}
+
+func TestHandleOnboardingInternalError(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := onboardingMultipartRequest(t, `{}`)
+	handleOnboarding(stubOnboardingService{err: errors.New("failed")}).ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", response.Code)
+	}
+}
+
+func onboardingMultipartRequest(t *testing.T, payload string) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("payload", payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	image, err := writer.CreateFormFile("passport_image", "passport.png")
+	if err != nil {
+		t.Fatalf("create image part: %v", err)
+	}
+	if _, err := image.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart body: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/onboarding", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	return request
 }

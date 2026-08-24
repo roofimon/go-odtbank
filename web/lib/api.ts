@@ -3,6 +3,8 @@ import type {
   AccountsWithMeta,
   DepositReceipt,
   EventLogResponse,
+  OnboardingReceipt,
+  OnboardingRequest,
   TransferReceipt,
   WithdrawalReceipt,
 } from "./types";
@@ -94,4 +96,20 @@ export function withdraw(
     { method: "POST" },
     JSON.stringify({ amount, account_id: accountId }),
   );
+}
+
+export function onboardCustomer(
+  payload: OnboardingRequest,
+  passportImage: File,
+): Promise<OnboardingReceipt> {
+  const form = new FormData();
+  form.append("payload", JSON.stringify(payload));
+  form.append("passport_image", passportImage);
+  return fetch(`${API_URL}/onboarding`, { method: "POST", body: form, cache: "no-store" })
+    .catch(() => { throw new ApiError(0, `Cannot reach backend at ${API_URL}`); })
+    .then(async (response) => {
+      const json = (await response.json().catch(() => null)) as (OnboardingReceipt & { error?: string }) | null;
+      if (!response.ok) throw new ApiError(response.status, json?.error ?? response.statusText);
+      return json as OnboardingReceipt;
+    });
 }

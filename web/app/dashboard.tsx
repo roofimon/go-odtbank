@@ -10,6 +10,7 @@ import {
 } from "../components/navigation-menu";
 import { TransferForm } from "../components/transfer-form";
 import { WithdrawForm } from "../components/withdraw-form";
+import { OnboardingForm } from "../components/onboarding-form";
 import { getAccounts, getEvents } from "../lib/api";
 import type { Account, EventLogResponse } from "../lib/types";
 
@@ -67,6 +68,10 @@ export default function Dashboard({
 
   const isUnreachable = error?.startsWith("Cannot reach backend") ?? false;
   const featureHeading = {
+    onboarding: {
+      title: "Open an account",
+      description: "Complete identity verification and create a new account.",
+    },
     transfer: {
       title: "Transfer funds",
       description: "Move money securely between existing accounts.",
@@ -136,6 +141,17 @@ export default function Dashboard({
               <TransferForm
                 accounts={accounts}
                 onCompleted={() => refresh(selectedId)}
+              />
+            </section>
+          )}
+
+          {activeFeature === "onboarding" && (
+            <section aria-label="Customer onboarding">
+              <OnboardingForm
+                onViewAccount={async (id) => {
+                  await refresh(id);
+                  setActiveFeature("transaction-history");
+                }}
               />
             </section>
           )}

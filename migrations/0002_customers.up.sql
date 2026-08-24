@@ -1,0 +1,25 @@
+CREATE TABLE customers (
+    id                       TEXT        PRIMARY KEY,
+    account_id               TEXT        NOT NULL UNIQUE,
+    legal_first_name         TEXT        NOT NULL,
+    legal_last_name          TEXT        NOT NULL,
+    date_of_birth            DATE        NOT NULL,
+    nationality              CHAR(2)     NOT NULL,
+    email                    TEXT        NOT NULL,
+    phone                    TEXT        NOT NULL,
+    address_line1            TEXT        NOT NULL,
+    address_line2            TEXT        NOT NULL DEFAULT '',
+    city                     TEXT        NOT NULL,
+    state_or_province        TEXT        NOT NULL DEFAULT '',
+    postal_code              TEXT        NOT NULL,
+    country                  CHAR(2)     NOT NULL,
+    document_type            TEXT        NOT NULL,
+    document_number          TEXT        NOT NULL,
+    document_issuing_country CHAR(2)     NOT NULL,
+    passport_image           BYTEA       NOT NULL,
+    passport_image_mime      TEXT        NOT NULL,
+    kyc_status               TEXT        NOT NULL,
+    created_at               TIMESTAMPTZ NOT NULL,
+    CONSTRAINT customers_document_unique
+        UNIQUE (document_type, document_number, document_issuing_country)
+);

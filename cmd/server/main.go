@@ -43,14 +43,20 @@ func main() {
 	transferService := service.NewTransferService(store, feePolicy, timeService, eventBusFunc)
 	depositService := service.NewDepositService(store)
 	withdrawService := service.NewWithdrawService(store)
+	onboardingStore, ok := store.(domain.OnboardingStore)
+	if !ok {
+		log.Fatal("configured store does not support onboarding")
+	}
+	onboardingService := service.NewOnboardingService(onboardingStore)
 
 	// 3. Setup HTTP transport
 	handler := httpapi.NewRouter(httpapi.Dependencies{
-		Store:           store,
-		TransferService: transferService,
-		DepositService:  depositService,
-		WithdrawService: withdrawService,
-		CORSOrigins:     os.Getenv("CORS_ORIGINS"),
+		Store:             store,
+		TransferService:   transferService,
+		DepositService:    depositService,
+		WithdrawService:   withdrawService,
+		OnboardingService: onboardingService,
+		CORSOrigins:       os.Getenv("CORS_ORIGINS"),
 	})
 
 	// 4. Start server

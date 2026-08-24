@@ -11,15 +11,41 @@ import (
 // It is the prototype implementation of Store; the Postgres implementation
 // will satisfy the same interface.
 type MemoryStore struct {
-	mu      sync.RWMutex
-	streams map[string][]domain.Event
+	mu        sync.RWMutex
+	streams   map[string][]domain.Event
+	customers map[string]domain.Customer
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		streams: make(map[string][]domain.Event),
+		streams:   make(map[string][]domain.Event),
+		customers: make(map[string]domain.Customer),
 	}
 }
+
+func (m *MemoryStore) CreateCustomerAccount(customer domain.Customer, opened domain.AccountOpened) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, existing := range m.customers {
+		if existing.GovernmentDocument.Type == customer.GovernmentDocument.Type &&
+			existing.GovernmentDocument.Number == customer.GovernmentDocument.Number &&
+			existing.GovernmentDocument.IssuingCountry == customer.GovernmentDocument.IssuingCountry {
+			return domain.ErrCustomerAlreadyExists
+		}
+	}
+	if _, exists := m.customers[customer.ID]; exists {
+		return domain.ErrCustomerAlreadyExists
+	}
+	if len(m.streams[customer.AccountID]) != 0 {
+		return ErrConcurrencyConflict
+	}
+	m.customers[customer.ID] = customer
+	m.streams[customer.AccountID] = []domain.Event{opened}
+	return nil
+}
+
+var _ domain.OnboardingStore = (*MemoryStore)(nil)
 
 // Append stores the event at the next sequence position for its aggregate,
 // provided expectedVersion matches the current stream length.

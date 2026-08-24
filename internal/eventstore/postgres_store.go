@@ -3,9 +3,11 @@ package eventstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go-odtbank/internal/domain"
@@ -28,6 +30,59 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 // Close releases the underlying connection pool.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
+}
+
+func (s *PostgresStore) CreateCustomerAccount(customer domain.Customer, opened domain.AccountOpened) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("eventstore: begin onboarding: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO customers (
+			id, account_id, legal_first_name, legal_last_name, date_of_birth,
+			nationality, email, phone, address_line1, address_line2, city,
+			state_or_province, postal_code, country, document_type,
+			document_number, document_issuing_country, passport_image,
+			passport_image_mime, kyc_status, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+	`, customer.ID, customer.AccountID, customer.LegalFirstName, customer.LegalLastName,
+		customer.DateOfBirth, customer.Nationality, customer.Email, customer.Phone,
+		customer.ResidentialAddress.Line1, customer.ResidentialAddress.Line2,
+		customer.ResidentialAddress.City, customer.ResidentialAddress.StateOrProvince,
+		customer.ResidentialAddress.PostalCode, customer.ResidentialAddress.Country,
+		customer.GovernmentDocument.Type, customer.GovernmentDocument.Number,
+		customer.GovernmentDocument.IssuingCountry, customer.PassportImage,
+		customer.PassportImageMIME, customer.KYCStatus, customer.CreatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return domain.ErrCustomerAlreadyExists
+		}
+		return fmt.Errorf("eventstore: insert customer: %w", err)
+	}
+	payload, err := json.Marshal(opened)
+	if err != nil {
+		return fmt.Errorf("eventstore: marshal opening event: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO events (aggregate_id, sequence, event_type, payload, occurred_at)
+		VALUES ($1, 0, $2, $3, $4)
+	`, opened.AggregateID(), opened.EventType(), payload, opened.OccurredAt())
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrConcurrencyConflict
+		}
+		return fmt.Errorf("eventstore: insert opening event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("eventstore: commit onboarding: %w", err)
+	}
+	return nil
 }
 
 // Append inserts a single event. expectedVersion must equal the current
@@ -157,3 +212,4 @@ func decodeEvent(aggregateID, eventType string, payload []byte) (domain.Event, e
 
 // Compile-time check that PostgresStore satisfies Store.
 var _ Store = (*PostgresStore)(nil)
+var _ domain.OnboardingStore = (*PostgresStore)(nil)

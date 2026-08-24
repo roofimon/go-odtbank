@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -15,11 +16,12 @@ import (
 )
 
 type Dependencies struct {
-	Store           eventstore.Store
-	TransferService domain.TransferService
-	DepositService  domain.DepositService
-	WithdrawService domain.WithdrawService
-	CORSOrigins     string
+	Store             eventstore.Store
+	TransferService   domain.TransferService
+	DepositService    domain.DepositService
+	WithdrawService   domain.WithdrawService
+	OnboardingService domain.OnboardingService
+	CORSOrigins       string
 }
 
 func NewRouter(deps Dependencies) http.Handler {
@@ -27,6 +29,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.HandleFunc("/transfer", handleTransfer(deps.TransferService)).Methods(http.MethodPost)
 	router.HandleFunc("/deposit", handleDeposit(deps.DepositService)).Methods(http.MethodPost)
 	router.HandleFunc("/withdraw", handleWithdraw(deps.WithdrawService)).Methods(http.MethodPost)
+	router.HandleFunc("/onboarding", handleOnboarding(deps.OnboardingService)).Methods(http.MethodPost)
 	router.HandleFunc("/accounts", handleListAccounts(deps.Store)).Methods(http.MethodGet)
 	router.HandleFunc("/accounts/{id}/events", handleAccountEvents(deps.Store)).Methods(http.MethodGet)
 	return withCORS(router, deps.CORSOrigins)
@@ -96,6 +99,81 @@ func handleWithdraw(withdrawService domain.WithdrawService) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, receipt)
+	}
+}
+
+type onboardingRequest struct {
+	LegalFirstName     string  `json:"legal_first_name"`
+	LegalLastName      string  `json:"legal_last_name"`
+	DateOfBirth        string  `json:"date_of_birth"`
+	Nationality        string  `json:"nationality"`
+	Email              string  `json:"email"`
+	Phone              string  `json:"phone"`
+	InitialDeposit     float64 `json:"initial_deposit"`
+	ResidentialAddress struct {
+		Line1           string `json:"line1"`
+		Line2           string `json:"line2"`
+		City            string `json:"city"`
+		StateOrProvince string `json:"state_or_province"`
+		PostalCode      string `json:"postal_code"`
+		Country         string `json:"country"`
+	} `json:"residential_address"`
+	GovernmentDocument struct {
+		Type           string `json:"type"`
+		Number         string `json:"number"`
+		IssuingCountry string `json:"issuing_country"`
+	} `json:"government_document"`
+}
+
+func handleOnboarding(onboardingService domain.OnboardingService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 6<<20)
+		if err := r.ParseMultipartForm(6 << 20); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid multipart request")
+			return
+		}
+		var req onboardingRequest
+		if err := json.Unmarshal([]byte(r.FormValue("payload")), &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid onboarding payload")
+			return
+		}
+		image, _, err := r.FormFile("passport_image")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "passport_image is required", "field": "passport_image"})
+			return
+		}
+		defer image.Close()
+		passportImage, err := io.ReadAll(io.LimitReader(image, (5<<20)+1))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "could not read passport image")
+			return
+		}
+		command := domain.OnboardingCommand{
+			LegalFirstName: req.LegalFirstName, LegalLastName: req.LegalLastName,
+			DateOfBirth: req.DateOfBirth, Nationality: req.Nationality,
+			Email: req.Email, Phone: req.Phone, InitialDeposit: req.InitialDeposit,
+			ResidentialAddress: domain.ResidentialAddress{
+				Line1: req.ResidentialAddress.Line1, Line2: req.ResidentialAddress.Line2,
+				City: req.ResidentialAddress.City, StateOrProvince: req.ResidentialAddress.StateOrProvince,
+				PostalCode: req.ResidentialAddress.PostalCode, Country: req.ResidentialAddress.Country,
+			},
+			GovernmentDocument: domain.GovernmentDocument{
+				Type: req.GovernmentDocument.Type, Number: req.GovernmentDocument.Number,
+				IssuingCountry: req.GovernmentDocument.IssuingCountry,
+			},
+			PassportImage: passportImage,
+		}
+		receipt, err := onboardingService.Onboard(command)
+		if err != nil {
+			var validationErr *domain.OnboardingValidationError
+			if errors.As(err, &validationErr) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": validationErr.Message, "field": validationErr.Field})
+				return
+			}
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, receipt)
 	}
 }
 
@@ -173,6 +251,8 @@ func statusForError(err error) int {
 	case errors.Is(err, domain.ErrAccountNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, eventstore.ErrConcurrencyConflict):
+		return http.StatusConflict
+	case errors.Is(err, domain.ErrCustomerAlreadyExists):
 		return http.StatusConflict
 	default:
 		var fundErr *domain.InsufficientFundsError

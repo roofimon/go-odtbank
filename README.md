@@ -6,6 +6,7 @@ Account balances are not stored as mutable rows. Each balance is rebuilt by repl
 
 ## Features
 
+- Open an individual account through a three-step KYC onboarding journey.
 - Transfer money between existing accounts (minimum `1.00`).
 - Deposit into an existing account (minimum `10.00`).
 - Withdraw from an existing account (minimum `10.00`, subject to available funds).
@@ -42,7 +43,7 @@ The domain package defines accounts, events, receipts, errors, and service contr
 ```text
 cmd/server/             Application entry point and dependency wiring
 internal/domain/        Domain types, events, errors, and interfaces
-internal/service/       Transfer, deposit, and withdrawal use cases
+internal/service/       Onboarding, transfer, deposit, and withdrawal use cases
 internal/httpapi/       Router, handlers, DTOs, CORS, and HTTP error mapping
 internal/eventstore/    In-memory and PostgreSQL event stores
 internal/eventbus/      In-process TransferCompletedEvent publisher
@@ -87,7 +88,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. The navigation displays one feature at a time: Transfer, Deposit, Withdraw, or Transaction history.
+Open `http://localhost:3000`. The navigation displays one feature at a time: Onboarding, Transfer, Deposit, Withdraw, or Transaction history.
 
 The browser calls `http://localhost:8080` by default. Override it when needed:
 
@@ -144,11 +145,66 @@ The `(aggregate_id, sequence)` primary key orders each stream and enforces optim
 
 ## API
 
-All request and response bodies use `application/json`. Errors have the form:
+Responses and non-onboarding request bodies use `application/json`. Errors have the form:
 
 ```json
 {"error":"account not found"}
 ```
+
+### Onboard a customer
+
+`POST /onboarding`
+
+Creates a verified demo customer and account. The customer must be at least 18. Initial funding may be omitted/zero or at least `10.00`.
+
+The request uses `multipart/form-data` with:
+
+- `payload`: the JSON profile below.
+- `passport_image`: a required JPEG, PNG, or WebP image up to 5 MB.
+
+```json
+{
+  "legal_first_name": "Ada",
+  "legal_last_name": "Lovelace",
+  "date_of_birth": "1990-12-10",
+  "nationality": "GB",
+  "email": "ada@example.com",
+  "phone": "+66812345678",
+  "residential_address": {
+    "line1": "1 Computing Lane",
+    "line2": "",
+    "city": "Bangkok",
+    "state_or_province": "",
+    "postal_code": "10110",
+    "country": "TH"
+  },
+  "government_document": {
+    "type": "passport",
+    "number": "P123456",
+    "issuing_country": "GB"
+  },
+  "initial_deposit": 25
+}
+```
+
+```bash
+curl -s http://localhost:8080/onboarding \
+  -F 'payload={"legal_first_name":"Ada","legal_last_name":"Lovelace","date_of_birth":"1990-12-10","nationality":"GB","email":"ada@example.com","phone":"+66812345678","residential_address":{"line1":"1 Computing Lane","line2":"","city":"Bangkok","state_or_province":"","postal_code":"10110","country":"TH"},"government_document":{"type":"passport","number":"P123456","issuing_country":"GB"},"initial_deposit":25}' \
+  -F 'passport_image=@passport.png;type=image/png'
+```
+
+Successful onboarding returns `201`:
+
+```json
+{
+  "customer_id": "cus_...",
+  "account_id": "acc_...",
+  "kyc_status": "verified",
+  "balance": 25
+}
+```
+
+The same normalized government document cannot be onboarded twice; duplicates return `409`. PostgreSQL onboarding requires migration `0002_customers`. The passport image is stored privately in the customer record and is never included in account events or read APIs.
 
 ### Transfer
 
@@ -242,7 +298,7 @@ A withdrawal may reduce the balance to exactly zero but cannot exceed the availa
 | ------ | --------------------------------------------------------------- |
 | `400`  | Malformed JSON or an amount below the operation minimum.        |
 | `404`  | The requested source, destination, or target account is absent. |
-| `409`  | A concurrent append changed the aggregate sequence.             |
+| `409`  | A concurrent append occurred or the KYC document already exists. |
 | `422`  | The source or withdrawal account has insufficient funds.        |
 | `503`  | Transfers are disabled by the configured `TimeService`.         |
 | `500`  | An unexpected persistence or server error occurred.             |
@@ -283,6 +339,9 @@ npm run build
 
 ## Current limitations
 
+- KYC verification is simulated and immediately marked verified; there is no identity provider, document upload, sanctions screening, or manual review.
+- Customer KYC is stored without application-level field encryption. Never submit real personal data to this demo.
+- There is no authentication or ownership authorization; the dashboard is shared.
 - A transfer appends to two account streams without a transaction spanning both appends. A debit can therefore succeed before a destination credit fails.
 - Money uses `float64`; production financial software should use integer minor units or a decimal representation.
 - Optimistic concurrency conflicts are returned to clients and are not retried.
