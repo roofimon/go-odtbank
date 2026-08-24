@@ -267,6 +267,12 @@ make vet
 make test
 ```
 
+Run the black-box HTTP scenarios for transfer, deposit, and withdrawal:
+
+```bash
+go test ./internal/httpapi -run 'EndToEnd$' -v
+```
+
 Dashboard checks:
 
 ```bash
