@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"math"
 	"net/http"
 	"net/mail"
 	"regexp"
@@ -137,7 +136,7 @@ func validateOnboarding(command domain.OnboardingCommand, now time.Time) (time.T
 	if age < 18 {
 		return time.Time{}, validationError("date_of_birth", "customer must be at least 18")
 	}
-	if math.IsNaN(command.InitialDeposit) || math.IsInf(command.InitialDeposit, 0) || command.InitialDeposit < 0 || (command.InitialDeposit > 0 && command.InitialDeposit < 10) {
+	if command.InitialDeposit < 0 || (command.InitialDeposit > 0 && command.InitialDeposit < 1000) {
 		return time.Time{}, validationError("initial_deposit", "must be zero or at least 10.00")
 	}
 	if len(command.PassportImage) == 0 {

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useRef, useState } from "react";
 import type { Account, TransferReceipt } from "../lib/types";
 import { transfer } from "../lib/api";
 import { formatMoney } from "../lib/format";
@@ -24,6 +24,9 @@ export function TransferForm({ accounts, onCompleted }: Props) {
   const [destId, setDestId] = useState("");
   const [amount, setAmount] = useState("");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const idempotencyKey = useRef("");
+
+  function detailsChanged() { idempotencyKey.current = ""; setStatus({ kind: "idle" }); }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -34,7 +37,8 @@ export function TransferForm({ accounts, onCompleted }: Props) {
     }
     setStatus({ kind: "loading" });
     try {
-      const receipt = await transfer(amt, sourceId, destId);
+      if (!idempotencyKey.current) idempotencyKey.current = crypto.randomUUID();
+      const receipt = await transfer(amt, sourceId, destId, idempotencyKey.current);
       setStatus({ kind: "success", receipt });
       onCompleted();
     } catch (err) {
@@ -66,7 +70,7 @@ export function TransferForm({ accounts, onCompleted }: Props) {
           <span className="text-xs font-medium text-text-2">To</span>
           <input
             value={destId}
-            onChange={(e) => setDestId(e.target.value)}
+            onChange={(e) => { setDestId(e.target.value); detailsChanged(); }}
             placeholder="Destination account ID"
             required
             className={inputClass}
@@ -81,7 +85,7 @@ export function TransferForm({ accounts, onCompleted }: Props) {
             min="1"
             required
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+            onChange={(e) => { setAmount(e.target.value); detailsChanged(); }}
             placeholder="10.00"
             className={inputClass}
           />

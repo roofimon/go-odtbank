@@ -41,7 +41,11 @@ func main() {
 		eb.Publish(event)
 	}
 
-	transferService := service.NewTransferService(store, feePolicy, timeService, eventBusFunc)
+	transferStore, ok := store.(domain.AtomicTransferStore)
+	if !ok {
+		log.Fatal("configured store does not support atomic transfers")
+	}
+	transferService := service.NewTransferService(transferStore, feePolicy, timeService, eventBusFunc)
 	depositService := service.NewDepositService(store)
 	withdrawService := service.NewWithdrawService(store)
 	onboardingStore, ok := store.(domain.OnboardingStore)
@@ -135,10 +139,10 @@ func closeStore(store eventstore.Store) {
 func seedIfEmpty(store eventstore.Store) error {
 	for _, acc := range []struct {
 		id     string
-		amount float64
+		amount domain.Money
 	}{
-		{"acc1", 100.0},
-		{"acc2", 50.0},
+		{"acc1", 10000},
+		{"acc2", 5000},
 	} {
 		events, err := store.Load(acc.id)
 		if err != nil {

@@ -6,7 +6,7 @@ import "time"
 // Balance is derived by folding events; it is never mutated directly.
 type Account struct {
 	ID      string
-	Balance float64
+	Balance Money
 }
 
 // ReplayAccount reconstructs an Account by folding its event history.
@@ -27,24 +27,26 @@ func ReplayAccount(id string, events []Event) *Account {
 }
 
 type TransferReceipt struct {
+	TransferID                string
+	Status                    string
 	InitialSourceAccount      *Account
 	InitialDestinationAccount *Account
 	FinalSourceAccount        *Account
 	FinalDestinationAccount   *Account
-	TransferAmount            float64
-	FeeAmount                 float64
+	TransferAmount            Money
+	FeeAmount                 Money
 }
 
 type DepositReceipt struct {
 	InitialAccount *Account
 	FinalAccount   *Account
-	DepositAmount  float64
+	DepositAmount  Money
 }
 
 type WithdrawalReceipt struct {
 	InitialAccount   *Account
 	FinalAccount     *Account
-	WithdrawalAmount float64
+	WithdrawalAmount Money
 }
 
 // TransferCompletedEvent is an integration-level event published after a
@@ -52,21 +54,22 @@ type WithdrawalReceipt struct {
 // listeners (audit, analytics) can subscribe to it without touching the event store.
 type TransferCompletedEvent struct {
 	Timestamp            time.Time
-	Amount               float64
+	TransferID           string
+	Amount               Money
 	SourceAccountID      string
 	DestinationAccountID string
-	Fee                  float64
+	Fee                  Money
 }
 
 type InsufficientFundsError struct {
 	Account *Account
-	Amount  float64
+	Amount  Money
 }
 
 func (e *InsufficientFundsError) Error() string {
 	return "insufficient funds in account"
 }
 
-func NewInsufficientFundsError(a *Account, amount float64) *InsufficientFundsError {
+func NewInsufficientFundsError(a *Account, amount Money) *InsufficientFundsError {
 	return &InsufficientFundsError{Account: a, Amount: amount}
 }

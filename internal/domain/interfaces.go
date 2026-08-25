@@ -11,7 +11,7 @@ type AccountRepository interface {
 }
 
 type FeePolicy interface {
-	CalculateFee(amount float64) float64
+	CalculateFee(amount Money) Money
 }
 
 type TimeService interface {
@@ -19,15 +19,16 @@ type TimeService interface {
 }
 
 type TransferService interface {
-	Transfer(amount float64, srcAcctID, dstAcctID string) (*TransferReceipt, error)
+	Transfer(command TransferCommand) (*TransferReceipt, error)
+	Find(id, sourceAccountID string) (*TransferRecord, error)
 }
 
 type DepositService interface {
-	Deposit(amount float64, accountID string) (*DepositReceipt, error)
+	Deposit(amount Money, accountID string) (*DepositReceipt, error)
 }
 
 type WithdrawService interface {
-	Withdraw(amount float64, accountID string) (*WithdrawalReceipt, error)
+	Withdraw(amount Money, accountID string) (*WithdrawalReceipt, error)
 }
 
 var (

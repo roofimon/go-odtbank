@@ -189,7 +189,7 @@ func (s *PostgresStore) ApproveApplication(id, adminID, accountID string, at tim
 	}
 	defer tx.Rollback(ctx)
 	var status string
-	var amount float64
+	var amount domain.Money
 	err = tx.QueryRow(ctx, `SELECT kyc_status,requested_initial_deposit FROM customers WHERE id=$1 FOR UPDATE`, id).Scan(&status, &amount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ErrApplicationNotFound
@@ -235,6 +235,163 @@ func (s *PostgresStore) RejectApplication(id, adminID, reason string, at time.Ti
 }
 
 var _ domain.ReviewStore = (*PostgresStore)(nil)
+var _ domain.AtomicTransferStore = (*PostgresStore)(nil)
+
+func (s *PostgresStore) ExecuteTransfer(record domain.TransferRecord) (*domain.TransferRecord, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `INSERT INTO transfers(id,source_account_id,destination_account_id,idempotency_key,amount_minor,fee_minor,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'pending',$7,$7)`, record.ID, record.SourceAccountID, record.DestinationAccountID, record.IdempotencyKey, int64(record.Amount), int64(record.Fee), record.CreatedAt)
+	created := err == nil
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			return nil, false, err
+		}
+		existing, e := s.findTransferByKey(ctx, record.SourceAccountID, record.IdempotencyKey)
+		if e != nil {
+			return nil, false, e
+		}
+		if existing.Amount != record.Amount || existing.DestinationAccountID != record.DestinationAccountID {
+			return nil, false, domain.ErrIdempotencyConflict
+		}
+		if existing.Status != domain.TransferPending {
+			return existing, false, nil
+		}
+		record = *existing
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, minString(record.SourceAccountID, record.DestinationAccountID)); err != nil {
+		return nil, false, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, maxString(record.SourceAccountID, record.DestinationAccountID)); err != nil {
+		return nil, false, err
+	}
+	var status string
+	if err = tx.QueryRow(ctx, `SELECT status FROM transfers WHERE id=$1 FOR UPDATE`, record.ID).Scan(&status); err != nil {
+		return nil, false, err
+	}
+	if status != domain.TransferPending {
+		tx.Rollback(ctx)
+		existing, findErr := s.FindTransfer(record.ID)
+		return existing, false, findErr
+	}
+	srcEvents, err := loadEventsTx(ctx, tx, record.SourceAccountID)
+	if err != nil {
+		return nil, false, err
+	}
+	dstEvents, err := loadEventsTx(ctx, tx, record.DestinationAccountID)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(srcEvents) == 0 || len(dstEvents) == 0 {
+		return s.failTransferTx(ctx, tx, record, "account_not_found", created)
+	}
+	src := domain.ReplayAccount(record.SourceAccountID, srcEvents)
+	record.InitialSourceBalance = src.Balance
+	if src.Balance < record.Amount+record.Fee {
+		return s.failTransferTx(ctx, tx, record, "insufficient_funds", created)
+	}
+	now := time.Now().UTC()
+	if record.Fee > 0 {
+		e := domain.MoneyDebited{Aggregate: record.SourceAccountID, Type: "MoneyDebited", Seq: len(srcEvents), Occurred: now, ID: record.SourceAccountID, Amount: record.Fee, TransferID: record.ID, Purpose: "fee", CounterpartyAccountID: record.DestinationAccountID}
+		if err = insertEventTx(ctx, tx, e); err != nil {
+			return nil, false, err
+		}
+		srcEvents = append(srcEvents, e)
+	}
+	debit := domain.MoneyDebited{Aggregate: record.SourceAccountID, Type: "MoneyDebited", Seq: len(srcEvents), Occurred: now, ID: record.SourceAccountID, Amount: record.Amount, TransferID: record.ID, Purpose: "transfer", CounterpartyAccountID: record.DestinationAccountID}
+	credit := domain.MoneyCredited{Aggregate: record.DestinationAccountID, Type: "MoneyCredited", Seq: len(dstEvents), Occurred: now, ID: record.DestinationAccountID, Amount: record.Amount, TransferID: record.ID, Purpose: "transfer", CounterpartyAccountID: record.SourceAccountID}
+	if err = insertEventTx(ctx, tx, debit); err != nil {
+		return nil, false, err
+	}
+	if err = insertEventTx(ctx, tx, credit); err != nil {
+		return nil, false, err
+	}
+	record.Status = domain.TransferCompleted
+	record.FinalSourceBalance = record.InitialSourceBalance - record.Amount - record.Fee
+	record.UpdatedAt = now
+	_, err = tx.Exec(ctx, `UPDATE transfers SET status=$2,initial_source_balance_minor=$3,final_source_balance_minor=$4,updated_at=$5 WHERE id=$1`, record.ID, record.Status, int64(record.InitialSourceBalance), int64(record.FinalSourceBalance), now)
+	if err != nil {
+		return nil, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return &record, true, nil
+}
+func minString(a, b string) string {
+	if a < b {
+		return a
+	}
+	return b
+}
+func maxString(a, b string) string {
+	if a > b {
+		return a
+	}
+	return b
+}
+func loadEventsTx(ctx context.Context, tx pgx.Tx, id string) ([]domain.Event, error) {
+	rows, err := tx.Query(ctx, `SELECT event_type,payload FROM events WHERE aggregate_id=$1 ORDER BY sequence`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Event{}
+	for rows.Next() {
+		var typ string
+		var payload []byte
+		if err = rows.Scan(&typ, &payload); err != nil {
+			return nil, err
+		}
+		e, decodeErr := decodeEvent(id, typ, payload)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+func insertEventTx(ctx context.Context, tx pgx.Tx, e domain.Event) error {
+	payload, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO events(aggregate_id,sequence,event_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5)`, e.AggregateID(), e.Version(), e.EventType(), payload, e.OccurredAt())
+	return err
+}
+func (s *PostgresStore) failTransferTx(ctx context.Context, tx pgx.Tx, r domain.TransferRecord, code string, created bool) (*domain.TransferRecord, bool, error) {
+	r.Status = domain.TransferFailed
+	r.FailureCode = code
+	r.UpdatedAt = time.Now().UTC()
+	_, err := tx.Exec(ctx, `UPDATE transfers SET status='failed',failure_code=$2,initial_source_balance_minor=$3,updated_at=$4 WHERE id=$1`, r.ID, code, int64(r.InitialSourceBalance), r.UpdatedAt)
+	if err != nil {
+		return nil, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return &r, created, nil
+}
+func (s *PostgresStore) findTransferByKey(ctx context.Context, source, key string) (*domain.TransferRecord, error) {
+	var r domain.TransferRecord
+	err := s.pool.QueryRow(ctx, `SELECT id,source_account_id,destination_account_id,idempotency_key,amount_minor,fee_minor,status,failure_code,initial_source_balance_minor,final_source_balance_minor,created_at,updated_at FROM transfers WHERE source_account_id=$1 AND idempotency_key=$2`, source, key).Scan(&r.ID, &r.SourceAccountID, &r.DestinationAccountID, &r.IdempotencyKey, &r.Amount, &r.Fee, &r.Status, &r.FailureCode, &r.InitialSourceBalance, &r.FinalSourceBalance, &r.CreatedAt, &r.UpdatedAt)
+	return &r, err
+}
+func (s *PostgresStore) FindTransfer(id string) (*domain.TransferRecord, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var r domain.TransferRecord
+	err := s.pool.QueryRow(ctx, `SELECT id,source_account_id,destination_account_id,idempotency_key,amount_minor,fee_minor,status,failure_code,initial_source_balance_minor,final_source_balance_minor,created_at,updated_at FROM transfers WHERE id=$1`, id).Scan(&r.ID, &r.SourceAccountID, &r.DestinationAccountID, &r.IdempotencyKey, &r.Amount, &r.Fee, &r.Status, &r.FailureCode, &r.InitialSourceBalance, &r.FinalSourceBalance, &r.CreatedAt, &r.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrTransferNotFound
+	}
+	return &r, err
+}
 
 // Append inserts a single event. expectedVersion must equal the current
 // stream length for the aggregate; a mismatch returns ErrConcurrencyConflict.

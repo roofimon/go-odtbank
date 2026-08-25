@@ -221,7 +221,7 @@ Successful onboarding returns `201`:
 }
 ```
 
-The same normalized email or government document cannot be onboarded twice; duplicates return `409`. PostgreSQL requires migrations through `0004_review_workflow`. Passport images are available only to authenticated administrators and are never included in account events.
+The same normalized email or government document cannot be onboarded twice; duplicates return `409`. PostgreSQL requires migrations through `0005_reliable_transfers`. Passport images are available only to authenticated administrators and are never included in account events.
 
 ### Log in and out
 
@@ -254,11 +254,14 @@ Approval creates and funds the account exactly once. Approval and rejection are 
 curl -s http://localhost:8080/transfer \
   -b cookies.txt \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000' \
   -d '{"amount":10,"source_account_id":"acc1","destination_account_id":"acc2"}'
 ```
 
 ```json
 {
+  "TransferID": "trf_...",
+  "Status": "completed",
   "InitialSourceAccount": {"ID":"acc1","Balance":100},
   "FinalSourceAccount": {"ID":"acc1","Balance":90},
   "DestinationAccountID": "acc2",
@@ -267,7 +270,9 @@ curl -s http://localhost:8080/transfer \
 }
 ```
 
-The default wiring uses `ZeroFeePolicy`; flat and percentage fee policies are also available.
+`Idempotency-Key` is required and scoped to the source account. Retrying the same transfer with the same key returns the original receipt without appending more events. Reusing it with different details returns `409`. `GET /transfers/{transfer_id}` returns the initiating customer's durable `pending`, `completed`, or `failed` status.
+
+The default wiring uses `ZeroFeePolicy`; flat fees use integer cents and percentage fees use integer basis points with half-up cent rounding.
 
 ### Deposit
 
@@ -322,7 +327,7 @@ A withdrawal may reduce the balance to exactly zero but cannot exceed the availa
 }
 ```
 
-`GET /accounts/{id}/events`
+`GET /accounts/{id}/events`. Transfer entries include a shared `transfer_id`, purpose, and counterparty account ID; the web timeline groups the transfer debit and fee together.
 
 ```json
 {
@@ -386,8 +391,8 @@ npm run build
 - KYC decisions are manual demo decisions; there is no identity provider or sanctions screening.
 - Customer KYC is stored without application-level field encryption. Never submit real personal data to this demo.
 - Sessions have no rotation, device management, password reset, email verification, or rate limiting.
-- A transfer appends to two account streams without a transaction spanning both appends. A debit can therefore succeed before a destination credit fails.
-- Money uses `float64`; production financial software should use integer minor units or a decimal representation.
+- Money is represented internally as signed 64-bit minor units for one implicit two-decimal currency; multi-currency is not supported.
+- Transfer workflow records are retained indefinitely and there is no pending-transfer reconciliation worker.
 - Optimistic concurrency conflicts are returned to clients and are not retried.
 - The event bus is in-process and fire-and-forget, with no durable delivery, backpressure, or handler panic recovery.
 - Event payloads have no schema versioning or upcasting strategy.

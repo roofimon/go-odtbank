@@ -9,6 +9,9 @@ export type StoredEvent = {
   type: "AccountOpened" | "MoneyDebited" | "MoneyCredited";
   amount?: number;
   occurred_at: string;
+  transfer_id?: string;
+  purpose?: "transfer" | "fee";
+  counterparty_account_id?: string;
 };
 
 export type AccountRef = {
@@ -17,6 +20,8 @@ export type AccountRef = {
 };
 
 export type TransferReceipt = {
+  TransferID: string;
+  Status: "pending" | "completed" | "failed";
   InitialSourceAccount: AccountRef;
   FinalSourceAccount: AccountRef;
   DestinationAccountID: string;

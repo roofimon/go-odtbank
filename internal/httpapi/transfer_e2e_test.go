@@ -41,16 +41,17 @@ func TestTransferEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode transfer request: %v", err)
 	}
-	response, err := server.Client().Post(
-		server.URL+"/transfer",
-		"application/json",
-		bytes.NewReader(requestBody),
-	)
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/transfer", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "e2e-transfer-1")
+	response, err := server.Client().Do(request)
 	if err != nil {
 		t.Fatalf("POST /transfer: %v", err)
 	}
 
 	var receipt struct {
+		TransferID           string
+		Status               string
 		InitialSourceAccount *domain.Account
 		FinalSourceAccount   *domain.Account
 		DestinationAccountID string
@@ -58,13 +59,16 @@ func TestTransferEndToEnd(t *testing.T) {
 		FeeAmount            float64
 	}
 	decodeResponse(t, response, http.StatusOK, &receipt)
-	if receipt.InitialSourceAccount.Balance != 100 || receipt.FinalSourceAccount.Balance != 75 {
+	if receipt.TransferID == "" || receipt.Status != domain.TransferCompleted {
+		t.Fatalf("transfer identity = %+v", receipt)
+	}
+	if receipt.InitialSourceAccount.Balance != 10000 || receipt.FinalSourceAccount.Balance != 7500 {
 		t.Errorf("source balances = %v -> %v, want 100 -> 75", receipt.InitialSourceAccount.Balance, receipt.FinalSourceAccount.Balance)
 	}
 	if receipt.DestinationAccountID != "acc2" {
 		t.Errorf("destination account = %q, want acc2", receipt.DestinationAccountID)
 	}
-	if completedEvent.Amount != 25 || completedEvent.SourceAccountID != "acc1" || completedEvent.DestinationAccountID != "acc2" {
+	if completedEvent.Amount != 2500 || completedEvent.SourceAccountID != "acc1" || completedEvent.DestinationAccountID != "acc2" {
 		t.Errorf("completed event = %+v", completedEvent)
 	}
 
@@ -72,6 +76,29 @@ func TestTransferEndToEnd(t *testing.T) {
 	assertE2EAccount(t, server, "acc2", 75, 2)
 	assertE2ELastEvent(t, server, "acc1", 1, "MoneyDebited", 25)
 	assertE2ELastEvent(t, server, "acc2", 1, "MoneyCredited", 25)
+
+	retry, _ := http.NewRequest(http.MethodPost, server.URL+"/transfer", bytes.NewReader(requestBody))
+	retry.Header.Set("Content-Type", "application/json")
+	retry.Header.Set("Idempotency-Key", "e2e-transfer-1")
+	retryResponse, err := server.Client().Do(retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retryReceipt struct{ TransferID string }
+	decodeResponse(t, retryResponse, http.StatusOK, &retryReceipt)
+	if retryReceipt.TransferID != receipt.TransferID {
+		t.Fatalf("retry transfer=%s", retryReceipt.TransferID)
+	}
+	statusResponse, err := server.Client().Get(server.URL + "/transfers/" + receipt.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status domain.TransferRecord
+	decodeResponse(t, statusResponse, http.StatusOK, &status)
+	if status.Status != domain.TransferCompleted {
+		t.Fatalf("status=%+v", status)
+	}
+	assertE2EAccount(t, server, "acc1", 75, 2)
 }
 
 func seedE2EAccount(t *testing.T, store *eventstore.MemoryStore, id string, balance float64) {
@@ -82,7 +109,7 @@ func seedE2EAccount(t *testing.T, store *eventstore.MemoryStore, id string, bala
 		Seq:            0,
 		Occurred:       time.Date(2026, time.August, 24, 0, 0, 0, 0, time.UTC),
 		ID:             id,
-		InitialBalance: balance,
+		InitialBalance: domain.Money(balance * 100),
 	}, 0)
 	if err != nil {
 		t.Fatalf("seed %s: %v", id, err)

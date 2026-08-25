@@ -22,7 +22,7 @@ func TestDepositEndToEnd(t *testing.T) {
 		Seq:            0,
 		Occurred:       time.Date(2026, time.August, 24, 0, 0, 0, 0, time.UTC),
 		ID:             "acc1",
-		InitialBalance: 100,
+		InitialBalance: 10000,
 	}, 0)
 	if err != nil {
 		t.Fatalf("seed account: %v", err)
@@ -52,13 +52,13 @@ func TestDepositEndToEnd(t *testing.T) {
 
 	var receipt domain.DepositReceipt
 	decodeResponse(t, response, http.StatusOK, &receipt)
-	if receipt.InitialAccount.ID != "acc1" || receipt.InitialAccount.Balance != 100 {
+	if receipt.InitialAccount.ID != "acc1" || receipt.InitialAccount.Balance != 10000 {
 		t.Errorf("initial account = %+v, want acc1 with balance 100", receipt.InitialAccount)
 	}
-	if receipt.FinalAccount.ID != "acc1" || receipt.FinalAccount.Balance != 125 {
+	if receipt.FinalAccount.ID != "acc1" || receipt.FinalAccount.Balance != 12500 {
 		t.Errorf("final account = %+v, want acc1 with balance 125", receipt.FinalAccount)
 	}
-	if receipt.DepositAmount != 25 {
+	if receipt.DepositAmount != 2500 {
 		t.Errorf("deposit amount = %v, want 25", receipt.DepositAmount)
 	}
 

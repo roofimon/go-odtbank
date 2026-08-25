@@ -1,14 +1,13 @@
 package service
 
 import (
-	"math"
 	"time"
 
 	"go-odtbank/internal/domain"
 	"go-odtbank/internal/eventstore"
 )
 
-const minimumDepositAmount = 10.0
+const minimumDepositAmount domain.Money = 1000
 
 type DepositService struct {
 	eventStore eventstore.Store
@@ -18,8 +17,8 @@ func NewDepositService(store eventstore.Store) *DepositService {
 	return &DepositService{eventStore: store}
 }
 
-func (s *DepositService) Deposit(amount float64, accountID string) (*domain.DepositReceipt, error) {
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < minimumDepositAmount {
+func (s *DepositService) Deposit(amount domain.Money, accountID string) (*domain.DepositReceipt, error) {
+	if amount < minimumDepositAmount {
 		return nil, domain.ErrInvalidDepositAmount
 	}
 

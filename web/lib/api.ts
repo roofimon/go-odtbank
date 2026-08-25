@@ -69,10 +69,11 @@ export function transfer(
   amount: number,
   sourceAccountId: string,
   destinationAccountId: string,
+  idempotencyKey: string,
 ): Promise<TransferReceipt> {
   return request<TransferReceipt>(
     "/transfer",
-    { method: "POST" },
+    { method: "POST", headers: { "Idempotency-Key": idempotencyKey } },
     JSON.stringify({
       amount,
       source_account_id: sourceAccountId,

@@ -2,7 +2,6 @@ package service_test
 
 import (
 	"errors"
-	"math"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ func seededDepositStore(t *testing.T) *eventstore.MemoryStore {
 	store := eventstore.NewMemoryStore()
 	err := store.Append(domain.AccountOpened{
 		Aggregate: "acc1", Type: "AccountOpened", Seq: 0,
-		Occurred: time.Now(), ID: "acc1", InitialBalance: 100,
+		Occurred: time.Now(), ID: "acc1", InitialBalance: 10000,
 	}, 0)
 	if err != nil {
 		t.Fatalf("seed account: %v", err)
@@ -25,7 +24,7 @@ func seededDepositStore(t *testing.T) *eventstore.MemoryStore {
 }
 
 func TestDeposit_AppendsCreditAndReturnsReceipt(t *testing.T) {
-	for _, amount := range []float64{10, 25.50} {
+	for _, amount := range []domain.Money{1000, 2550} {
 		t.Run("amount", func(t *testing.T) {
 			store := seededDepositStore(t)
 			svc := service.NewDepositService(store)
@@ -34,7 +33,7 @@ func TestDeposit_AppendsCreditAndReturnsReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Deposit: %v", err)
 			}
-			if receipt.InitialAccount.Balance != 100 || receipt.FinalAccount.Balance != 100+amount {
+			if receipt.InitialAccount.Balance != 10000 || receipt.FinalAccount.Balance != 10000+amount {
 				t.Fatalf("unexpected receipt: %+v", receipt)
 			}
 
@@ -54,7 +53,7 @@ func TestDeposit_AppendsCreditAndReturnsReceipt(t *testing.T) {
 }
 
 func TestDeposit_RejectsInvalidAmountsWithoutAppending(t *testing.T) {
-	for _, amount := range []float64{-1, 0, 9.99, math.NaN(), math.Inf(1), math.Inf(-1)} {
+	for _, amount := range []domain.Money{-1, 0, 999} {
 		store := seededDepositStore(t)
 		svc := service.NewDepositService(store)
 		if _, err := svc.Deposit(amount, "acc1"); !errors.Is(err, domain.ErrInvalidDepositAmount) {
@@ -69,7 +68,7 @@ func TestDeposit_RejectsInvalidAmountsWithoutAppending(t *testing.T) {
 
 func TestDeposit_AccountNotFound(t *testing.T) {
 	svc := service.NewDepositService(eventstore.NewMemoryStore())
-	if _, err := svc.Deposit(10, "missing"); !errors.Is(err, domain.ErrAccountNotFound) {
+	if _, err := svc.Deposit(1000, "missing"); !errors.Is(err, domain.ErrAccountNotFound) {
 		t.Fatalf("error = %v, want ErrAccountNotFound", err)
 	}
 }
@@ -83,7 +82,7 @@ func (s conflictingStore) Append(domain.Event, int) error {
 func TestDeposit_PropagatesConcurrencyConflict(t *testing.T) {
 	store := seededDepositStore(t)
 	svc := service.NewDepositService(conflictingStore{store})
-	if _, err := svc.Deposit(10, "acc1"); !errors.Is(err, eventstore.ErrConcurrencyConflict) {
+	if _, err := svc.Deposit(1000, "acc1"); !errors.Is(err, eventstore.ErrConcurrencyConflict) {
 		t.Fatalf("error = %v, want ErrConcurrencyConflict", err)
 	}
 }

@@ -31,7 +31,7 @@ type OnboardingCommand struct {
 	ResidentialAddress ResidentialAddress
 	GovernmentDocument GovernmentDocument
 	PassportImage      []byte
-	InitialDeposit     float64
+	InitialDeposit     Money
 }
 
 type Customer struct {
@@ -49,7 +49,7 @@ type Customer struct {
 	PassportImage      []byte
 	PassportImageMIME  string
 	KYCStatus          string
-	RequestedDeposit   float64
+	RequestedDeposit   Money
 	ReviewedBy         string
 	ReviewedAt         *time.Time
 	RejectionReason    string

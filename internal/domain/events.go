@@ -18,7 +18,7 @@ type AccountOpened struct {
 	Seq            int
 	Occurred       time.Time
 	ID             string
-	InitialBalance float64
+	InitialBalance Money
 }
 
 func (e AccountOpened) AggregateID() string   { return e.Aggregate }
@@ -28,12 +28,15 @@ func (e AccountOpened) OccurredAt() time.Time { return e.Occurred }
 
 // MoneyDebited records that funds were removed from an account.
 type MoneyDebited struct {
-	Aggregate string
-	Type      string
-	Seq       int
-	Occurred  time.Time
-	ID        string
-	Amount    float64
+	Aggregate             string
+	Type                  string
+	Seq                   int
+	Occurred              time.Time
+	ID                    string
+	Amount                Money
+	TransferID            string `json:"transfer_id,omitempty"`
+	Purpose               string `json:"purpose,omitempty"`
+	CounterpartyAccountID string `json:"counterparty_account_id,omitempty"`
 }
 
 func (e MoneyDebited) AggregateID() string   { return e.Aggregate }
@@ -43,12 +46,15 @@ func (e MoneyDebited) OccurredAt() time.Time { return e.Occurred }
 
 // MoneyCredited records that funds were added to an account.
 type MoneyCredited struct {
-	Aggregate string
-	Type      string
-	Seq       int
-	Occurred  time.Time
-	ID        string
-	Amount    float64
+	Aggregate             string
+	Type                  string
+	Seq                   int
+	Occurred              time.Time
+	ID                    string
+	Amount                Money
+	TransferID            string `json:"transfer_id,omitempty"`
+	Purpose               string `json:"purpose,omitempty"`
+	CounterpartyAccountID string `json:"counterparty_account_id,omitempty"`
 }
 
 func (e MoneyCredited) AggregateID() string   { return e.Aggregate }

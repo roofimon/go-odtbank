@@ -1,29 +1,30 @@
 package policy
 
 import (
+	"go-odtbank/internal/domain"
 	"time"
 )
 
 type FlatFeePolicy struct {
-	Fee float64
+	Fee domain.Money
 }
 
-func (p *FlatFeePolicy) CalculateFee(amount float64) float64 {
+func (p *FlatFeePolicy) CalculateFee(amount domain.Money) domain.Money {
 	return p.Fee
 }
 
 type ZeroFeePolicy struct{}
 
-func (p *ZeroFeePolicy) CalculateFee(amount float64) float64 {
+func (p *ZeroFeePolicy) CalculateFee(amount domain.Money) domain.Money {
 	return 0
 }
 
 type VariableFeePolicy struct {
-	Percentage float64
+	BasisPoints int64
 }
 
-func (p *VariableFeePolicy) CalculateFee(amount float64) float64 {
-	return amount * p.Percentage
+func (p *VariableFeePolicy) CalculateFee(amount domain.Money) domain.Money {
+	return domain.Money((int64(amount)*p.BasisPoints + 5000) / 10000)
 }
 
 type DefaultTimeService struct {

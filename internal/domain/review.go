@@ -11,7 +11,7 @@ type ApplicationSummary struct {
 	LegalLastName    string     `json:"legal_last_name"`
 	Email            string     `json:"email"`
 	KYCStatus        string     `json:"kyc_status"`
-	RequestedDeposit float64    `json:"requested_initial_deposit"`
+	RequestedDeposit Money      `json:"requested_initial_deposit"`
 	CreatedAt        time.Time  `json:"created_at"`
 	ReviewedAt       *time.Time `json:"reviewed_at,omitempty"`
 	RejectionReason  string     `json:"rejection_reason,omitempty"`

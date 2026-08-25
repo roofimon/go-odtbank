@@ -1,14 +1,13 @@
 package service
 
 import (
-	"math"
 	"time"
 
 	"go-odtbank/internal/domain"
 	"go-odtbank/internal/eventstore"
 )
 
-const minimumWithdrawAmount = 10.0
+const minimumWithdrawAmount domain.Money = 1000
 
 type WithdrawService struct {
 	eventStore eventstore.Store
@@ -18,8 +17,8 @@ func NewWithdrawService(store eventstore.Store) *WithdrawService {
 	return &WithdrawService{eventStore: store}
 }
 
-func (s *WithdrawService) Withdraw(amount float64, accountID string) (*domain.WithdrawalReceipt, error) {
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < minimumWithdrawAmount {
+func (s *WithdrawService) Withdraw(amount domain.Money, accountID string) (*domain.WithdrawalReceipt, error) {
+	if amount < minimumWithdrawAmount {
 		return nil, domain.ErrInvalidWithdrawAmount
 	}
 

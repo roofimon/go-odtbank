@@ -17,6 +17,7 @@ type MemoryStore struct {
 	customers map[string]domain.Customer
 	admins    map[string]domain.Admin
 	sessions  map[string]domain.Session
+	transfers map[string]domain.TransferRecord
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -25,6 +26,7 @@ func NewMemoryStore() *MemoryStore {
 		customers: make(map[string]domain.Customer),
 		admins:    make(map[string]domain.Admin),
 		sessions:  make(map[string]domain.Session),
+		transfers: make(map[string]domain.TransferRecord),
 	}
 }
 
@@ -125,6 +127,61 @@ func (m *MemoryStore) DeleteSession(tokenHash string) error {
 var _ domain.OnboardingStore = (*MemoryStore)(nil)
 var _ domain.AuthStore = (*MemoryStore)(nil)
 var _ domain.ReviewStore = (*MemoryStore)(nil)
+var _ domain.AtomicTransferStore = (*MemoryStore)(nil)
+
+func (m *MemoryStore) ExecuteTransfer(record domain.TransferRecord) (*domain.TransferRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, existing := range m.transfers {
+		if existing.SourceAccountID == record.SourceAccountID && existing.IdempotencyKey == record.IdempotencyKey {
+			if existing.Amount != record.Amount || existing.DestinationAccountID != record.DestinationAccountID {
+				return nil, false, domain.ErrIdempotencyConflict
+			}
+			copy := existing
+			return &copy, false, nil
+		}
+	}
+	srcEvents, dstEvents := m.streams[record.SourceAccountID], m.streams[record.DestinationAccountID]
+	if len(srcEvents) == 0 || len(dstEvents) == 0 {
+		record.Status = domain.TransferFailed
+		record.FailureCode = "account_not_found"
+		m.transfers[record.ID] = record
+		return &record, true, nil
+	}
+	src := domain.ReplayAccount(record.SourceAccountID, srcEvents)
+	record.InitialSourceBalance = src.Balance
+	if src.Balance < record.Amount+record.Fee {
+		record.Status = domain.TransferFailed
+		record.FailureCode = "insufficient_funds"
+		m.transfers[record.ID] = record
+		return &record, true, nil
+	}
+	now := time.Now().UTC()
+	if record.Fee > 0 {
+		e := domain.MoneyDebited{Aggregate: record.SourceAccountID, Type: "MoneyDebited", Seq: len(srcEvents), Occurred: now, ID: record.SourceAccountID, Amount: record.Fee, TransferID: record.ID, Purpose: "fee", CounterpartyAccountID: record.DestinationAccountID}
+		srcEvents = append(srcEvents, e)
+	}
+	debit := domain.MoneyDebited{Aggregate: record.SourceAccountID, Type: "MoneyDebited", Seq: len(srcEvents), Occurred: now, ID: record.SourceAccountID, Amount: record.Amount, TransferID: record.ID, Purpose: "transfer", CounterpartyAccountID: record.DestinationAccountID}
+	credit := domain.MoneyCredited{Aggregate: record.DestinationAccountID, Type: "MoneyCredited", Seq: len(dstEvents), Occurred: now, ID: record.DestinationAccountID, Amount: record.Amount, TransferID: record.ID, Purpose: "transfer", CounterpartyAccountID: record.SourceAccountID}
+	srcEvents = append(srcEvents, debit)
+	dstEvents = append(dstEvents, credit)
+	m.streams[record.SourceAccountID] = srcEvents
+	m.streams[record.DestinationAccountID] = dstEvents
+	record.Status = domain.TransferCompleted
+	record.FinalSourceBalance = record.InitialSourceBalance - record.Amount - record.Fee
+	record.UpdatedAt = now
+	m.transfers[record.ID] = record
+	return &record, true, nil
+}
+func (m *MemoryStore) FindTransfer(id string) (*domain.TransferRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, ok := m.transfers[id]
+	if !ok {
+		return nil, domain.ErrTransferNotFound
+	}
+	return &r, nil
+}
 
 func summary(customer domain.Customer) domain.ApplicationSummary {
 	return domain.ApplicationSummary{CustomerID: customer.ID, LegalFirstName: customer.LegalFirstName, LegalLastName: customer.LegalLastName, Email: customer.Email, KYCStatus: customer.KYCStatus, RequestedDeposit: customer.RequestedDeposit, CreatedAt: customer.CreatedAt, ReviewedAt: customer.ReviewedAt, RejectionReason: customer.RejectionReason}

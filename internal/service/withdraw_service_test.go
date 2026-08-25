@@ -2,7 +2,6 @@ package service_test
 
 import (
 	"errors"
-	"math"
 	"testing"
 
 	"go-odtbank/internal/domain"
@@ -11,7 +10,7 @@ import (
 )
 
 func TestWithdraw_AppendsDebitAndReturnsReceipt(t *testing.T) {
-	for _, amount := range []float64{10, 25.50, 100} {
+	for _, amount := range []domain.Money{1000, 2550, 10000} {
 		t.Run("amount", func(t *testing.T) {
 			store := seededDepositStore(t)
 			svc := service.NewWithdrawService(store)
@@ -20,7 +19,7 @@ func TestWithdraw_AppendsDebitAndReturnsReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Withdraw: %v", err)
 			}
-			if receipt.InitialAccount.Balance != 100 || receipt.FinalAccount.Balance != 100-amount {
+			if receipt.InitialAccount.Balance != 10000 || receipt.FinalAccount.Balance != 10000-amount {
 				t.Fatalf("unexpected receipt: %+v", receipt)
 			}
 			if receipt.WithdrawalAmount != amount {
@@ -43,7 +42,7 @@ func TestWithdraw_AppendsDebitAndReturnsReceipt(t *testing.T) {
 }
 
 func TestWithdraw_RejectsInvalidAmountsWithoutAppending(t *testing.T) {
-	for _, amount := range []float64{-1, 0, 9.99, math.NaN(), math.Inf(1), math.Inf(-1)} {
+	for _, amount := range []domain.Money{-1, 0, 999} {
 		store := seededDepositStore(t)
 		svc := service.NewWithdrawService(store)
 		if _, err := svc.Withdraw(amount, "acc1"); !errors.Is(err, domain.ErrInvalidWithdrawAmount) {
@@ -59,7 +58,7 @@ func TestWithdraw_RejectsInvalidAmountsWithoutAppending(t *testing.T) {
 func TestWithdraw_RejectsInsufficientFundsWithoutAppending(t *testing.T) {
 	store := seededDepositStore(t)
 	svc := service.NewWithdrawService(store)
-	_, err := svc.Withdraw(110, "acc1")
+	_, err := svc.Withdraw(11000, "acc1")
 	var fundsErr *domain.InsufficientFundsError
 	if !errors.As(err, &fundsErr) {
 		t.Fatalf("error = %v, want InsufficientFundsError", err)
@@ -72,7 +71,7 @@ func TestWithdraw_RejectsInsufficientFundsWithoutAppending(t *testing.T) {
 
 func TestWithdraw_AccountNotFound(t *testing.T) {
 	svc := service.NewWithdrawService(eventstore.NewMemoryStore())
-	if _, err := svc.Withdraw(10, "missing"); !errors.Is(err, domain.ErrAccountNotFound) {
+	if _, err := svc.Withdraw(1000, "missing"); !errors.Is(err, domain.ErrAccountNotFound) {
 		t.Fatalf("error = %v, want ErrAccountNotFound", err)
 	}
 }
@@ -80,7 +79,7 @@ func TestWithdraw_AccountNotFound(t *testing.T) {
 func TestWithdraw_PropagatesConcurrencyConflict(t *testing.T) {
 	store := seededDepositStore(t)
 	svc := service.NewWithdrawService(conflictingStore{store})
-	if _, err := svc.Withdraw(10, "acc1"); !errors.Is(err, eventstore.ErrConcurrencyConflict) {
+	if _, err := svc.Withdraw(1000, "acc1"); !errors.Is(err, eventstore.ErrConcurrencyConflict) {
 		t.Fatalf("error = %v, want ErrConcurrencyConflict", err)
 	}
 }

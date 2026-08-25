@@ -32,19 +32,19 @@ func (s stubOnboardingService) Onboard(domain.OnboardingCommand) (*domain.Onboar
 	return s.receipt, s.err
 }
 
-func (s stubWithdrawService) Withdraw(float64, string) (*domain.WithdrawalReceipt, error) {
+func (s stubWithdrawService) Withdraw(domain.Money, string) (*domain.WithdrawalReceipt, error) {
 	return s.receipt, s.err
 }
 
-func (s stubDepositService) Deposit(float64, string) (*domain.DepositReceipt, error) {
+func (s stubDepositService) Deposit(domain.Money, string) (*domain.DepositReceipt, error) {
 	return s.receipt, s.err
 }
 
 func TestHandleDepositSuccess(t *testing.T) {
 	svc := stubDepositService{receipt: &domain.DepositReceipt{
-		InitialAccount: &domain.Account{ID: "acc1", Balance: 100},
-		FinalAccount:   &domain.Account{ID: "acc1", Balance: 110},
-		DepositAmount:  10,
+		InitialAccount: &domain.Account{ID: "acc1", Balance: 10000},
+		FinalAccount:   &domain.Account{ID: "acc1", Balance: 11000},
+		DepositAmount:  1000,
 	}}
 	req := httptest.NewRequest(http.MethodPost, "/deposit", strings.NewReader(`{"account_id":"acc1","amount":10}`))
 	res := httptest.NewRecorder()
@@ -92,9 +92,9 @@ func TestHandleDepositRejectsInvalidJSON(t *testing.T) {
 
 func TestHandleWithdrawSuccess(t *testing.T) {
 	svc := stubWithdrawService{receipt: &domain.WithdrawalReceipt{
-		InitialAccount:   &domain.Account{ID: "acc1", Balance: 100},
-		FinalAccount:     &domain.Account{ID: "acc1", Balance: 90},
-		WithdrawalAmount: 10,
+		InitialAccount:   &domain.Account{ID: "acc1", Balance: 10000},
+		FinalAccount:     &domain.Account{ID: "acc1", Balance: 9000},
+		WithdrawalAmount: 1000,
 	}}
 	req := httptest.NewRequest(http.MethodPost, "/withdraw", strings.NewReader(`{"account_id":"acc1","amount":10}`))
 	res := httptest.NewRecorder()

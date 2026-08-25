@@ -1,133 +1,76 @@
 package service
 
 import (
-	"go-odtbank/internal/domain"
-	"go-odtbank/internal/eventstore"
+	"crypto/rand"
+	"encoding/hex"
+	"strings"
 	"time"
+
+	"go-odtbank/internal/domain"
 )
 
 type TransferService struct {
-	eventStore        eventstore.Store
-	feePolicy         domain.FeePolicy
-	timeService       domain.TimeService
-	eventBus          func(event domain.TransferCompletedEvent)
-	minTransferAmount float64
+	store       domain.AtomicTransferStore
+	feePolicy   domain.FeePolicy
+	timeService domain.TimeService
+	eventBus    func(domain.TransferCompletedEvent)
 }
 
-func NewTransferService(
-	store eventstore.Store,
-	fee domain.FeePolicy,
-	ts domain.TimeService,
-	eventBus func(event domain.TransferCompletedEvent),
-) *TransferService {
-	return &TransferService{
-		eventStore:        store,
-		feePolicy:         fee,
-		timeService:       ts,
-		eventBus:          eventBus,
-		minTransferAmount: 1.0,
-	}
+func NewTransferService(store domain.AtomicTransferStore, fee domain.FeePolicy, ts domain.TimeService, bus func(domain.TransferCompletedEvent)) *TransferService {
+	return &TransferService{store: store, feePolicy: fee, timeService: ts, eventBus: bus}
 }
-
-func (s *TransferService) Transfer(amount float64, srcID, dstID string) (*domain.TransferReceipt, error) {
-	if amount < s.minTransferAmount {
+func (s *TransferService) Transfer(command domain.TransferCommand) (*domain.TransferReceipt, error) {
+	if command.Amount < 100 || command.SourceAccountID == command.DestinationAccountID {
 		return nil, domain.ErrInvalidTransferAmount
 	}
-
+	command.IdempotencyKey = strings.TrimSpace(command.IdempotencyKey)
+	if command.IdempotencyKey == "" || len(command.IdempotencyKey) > 128 {
+		return nil, domain.ErrIdempotencyKeyRequired
+	}
 	if !s.timeService.IsServiceAvailable(time.Now()) {
 		return nil, domain.ErrOutOfService
 	}
-
-	srcEvents, err := s.eventStore.Load(srcID)
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	fee := s.feePolicy.CalculateFee(command.Amount)
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if fee < 0 || int64(command.Amount) > maxInt64-int64(fee) {
+		return nil, domain.ErrInvalidTransferAmount
+	}
+	record, completedNow, err := s.store.ExecuteTransfer(domain.TransferRecord{ID: "trf_" + hex.EncodeToString(raw), SourceAccountID: command.SourceAccountID, DestinationAccountID: command.DestinationAccountID, IdempotencyKey: command.IdempotencyKey, Amount: command.Amount, Fee: fee, Status: domain.TransferPending, CreatedAt: now, UpdatedAt: now})
 	if err != nil {
 		return nil, err
 	}
-	if len(srcEvents) == 0 {
-		return nil, domain.ErrAccountNotFound
+	if record.Status == domain.TransferFailed {
+		return nil, transferFailure(record)
 	}
-
-	dstEvents, err := s.eventStore.Load(dstID)
-	if err != nil {
-		return nil, err
+	if completedNow && s.eventBus != nil {
+		s.eventBus(domain.TransferCompletedEvent{TransferID: record.ID, Timestamp: record.UpdatedAt, Amount: record.Amount, SourceAccountID: record.SourceAccountID, DestinationAccountID: record.DestinationAccountID, Fee: record.Fee})
 	}
-	if len(dstEvents) == 0 {
-		return nil, domain.ErrAccountNotFound
-	}
-
-	srcAcct := domain.ReplayAccount(srcID, srcEvents)
-	dstAcct := domain.ReplayAccount(dstID, dstEvents)
-
-	initialSrc := *srcAcct
-	initialDst := *dstAcct
-
-	fee := s.feePolicy.CalculateFee(amount)
-	totalDebit := amount
-	if fee > 0 {
-		totalDebit += fee
-	}
-
-	if srcAcct.Balance < totalDebit {
-		return nil, domain.NewInsufficientFundsError(srcAcct, totalDebit)
-	}
-
-	now := time.Now()
-
-	if fee > 0 {
-		feeEvent := domain.MoneyDebited{
-			Aggregate: srcID,
-			Type:      "MoneyDebited",
-			Seq:       len(srcEvents),
-			Occurred:  now,
-			ID:        srcID,
-			Amount:    fee,
-		}
-		if err := s.eventStore.Append(feeEvent, feeEvent.Seq); err != nil {
-			return nil, err
-		}
-		srcEvents = append(srcEvents, feeEvent)
-	}
-
-	debitEvent := domain.MoneyDebited{
-		Aggregate: srcID,
-		Type:      "MoneyDebited",
-		Seq:       len(srcEvents),
-		Occurred:  now,
-		ID:        srcID,
-		Amount:    amount,
-	}
-	if err := s.eventStore.Append(debitEvent, debitEvent.Seq); err != nil {
-		return nil, err
-	}
-
-	creditEvent := domain.MoneyCredited{
-		Aggregate: dstID,
-		Type:      "MoneyCredited",
-		Seq:       len(dstEvents),
-		Occurred:  now,
-		ID:        dstID,
-		Amount:    amount,
-	}
-	if err := s.eventStore.Append(creditEvent, creditEvent.Seq); err != nil {
-		return nil, err
-	}
-
-	finalSrc := domain.ReplayAccount(srcID, append(srcEvents, debitEvent))
-	finalDst := domain.ReplayAccount(dstID, append(dstEvents, creditEvent))
-
-	s.eventBus(domain.TransferCompletedEvent{
-		Timestamp:            now,
-		Amount:               amount,
-		SourceAccountID:      srcID,
-		DestinationAccountID: dstID,
-		Fee:                  fee,
-	})
-
-	return &domain.TransferReceipt{
-		InitialSourceAccount:      &initialSrc,
-		InitialDestinationAccount: &initialDst,
-		FinalSourceAccount:        finalSrc,
-		FinalDestinationAccount:   finalDst,
-		TransferAmount:            amount,
-		FeeAmount:                 fee,
-	}, nil
+	return &domain.TransferReceipt{InitialSourceAccount: &domain.Account{ID: record.SourceAccountID, Balance: record.InitialSourceBalance}, FinalSourceAccount: &domain.Account{ID: record.SourceAccountID, Balance: record.FinalSourceBalance}, TransferAmount: record.Amount, FeeAmount: record.Fee, TransferID: record.ID, Status: record.Status}, nil
 }
+func transferFailure(r *domain.TransferRecord) error {
+	switch r.FailureCode {
+	case "account_not_found":
+		return domain.ErrAccountNotFound
+	case "insufficient_funds":
+		return domain.NewInsufficientFundsError(&domain.Account{ID: r.SourceAccountID, Balance: r.InitialSourceBalance}, r.Amount+r.Fee)
+	default:
+		return domain.ErrInvalidTransferAmount
+	}
+}
+func (s *TransferService) Find(id, sourceID string) (*domain.TransferRecord, error) {
+	r, err := s.store.FindTransfer(id)
+	if err != nil {
+		return nil, err
+	}
+	if sourceID != "" && r.SourceAccountID != sourceID {
+		return nil, domain.ErrForbidden
+	}
+	return r, nil
+}
+
+var _ domain.TransferService = (*TransferService)(nil)

@@ -47,6 +47,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		admin = func(h http.HandlerFunc) http.HandlerFunc { return requireAuth(deps.AuthService, requireAdmin(h)) }
 	}
 	router.HandleFunc("/transfer", banking(handleTransfer(deps.TransferService))).Methods(http.MethodPost)
+	router.HandleFunc("/transfers/{id}", banking(handleTransferStatus(deps.TransferService))).Methods(http.MethodGet)
 	router.HandleFunc("/deposit", banking(handleDeposit(deps.DepositService))).Methods(http.MethodPost)
 	router.HandleFunc("/withdraw", banking(handleWithdraw(deps.WithdrawService))).Methods(http.MethodPost)
 	router.HandleFunc("/accounts", banking(handleListAccounts(deps.Store))).Methods(http.MethodGet)
@@ -62,9 +63,9 @@ func NewRouter(deps Dependencies) http.Handler {
 }
 
 type transferRequest struct {
-	Amount   float64 `json:"amount"`
-	SourceID string  `json:"source_account_id"`
-	DestID   string  `json:"destination_account_id"`
+	Amount   domain.Money `json:"amount"`
+	SourceID string       `json:"source_account_id"`
+	DestID   string       `json:"destination_account_id"`
 }
 
 func handleTransfer(transferService domain.TransferService) http.HandlerFunc {
@@ -79,12 +80,14 @@ func handleTransfer(transferService domain.TransferService) http.HandlerFunc {
 			return
 		}
 
-		receipt, err := transferService.Transfer(req.Amount, req.SourceID, req.DestID)
+		receipt, err := transferService.Transfer(domain.TransferCommand{Amount: req.Amount, SourceAccountID: req.SourceID, DestinationAccountID: req.DestID, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
 			writeError(w, statusForError(err), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
+			"TransferID":           receipt.TransferID,
+			"Status":               receipt.Status,
 			"InitialSourceAccount": receipt.InitialSourceAccount,
 			"FinalSourceAccount":   receipt.FinalSourceAccount,
 			"DestinationAccountID": req.DestID,
@@ -94,9 +97,25 @@ func handleTransfer(transferService domain.TransferService) http.HandlerFunc {
 	}
 }
 
+func handleTransferStatus(service domain.TransferService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := principalFromRequest(r)
+		source := ""
+		if p != nil {
+			source = p.AccountID
+		}
+		record, err := service.Find(mux.Vars(r)["id"], source)
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, record)
+	}
+}
+
 type depositRequest struct {
-	Amount    float64 `json:"amount"`
-	AccountID string  `json:"account_id"`
+	Amount    domain.Money `json:"amount"`
+	AccountID string       `json:"account_id"`
 }
 
 func handleDeposit(depositService domain.DepositService) http.HandlerFunc {
@@ -121,8 +140,8 @@ func handleDeposit(depositService domain.DepositService) http.HandlerFunc {
 }
 
 type withdrawRequest struct {
-	Amount    float64 `json:"amount"`
-	AccountID string  `json:"account_id"`
+	Amount    domain.Money `json:"amount"`
+	AccountID string       `json:"account_id"`
 }
 
 func handleWithdraw(withdrawService domain.WithdrawService) http.HandlerFunc {
@@ -147,14 +166,14 @@ func handleWithdraw(withdrawService domain.WithdrawService) http.HandlerFunc {
 }
 
 type onboardingRequest struct {
-	LegalFirstName     string  `json:"legal_first_name"`
-	LegalLastName      string  `json:"legal_last_name"`
-	DateOfBirth        string  `json:"date_of_birth"`
-	Nationality        string  `json:"nationality"`
-	Email              string  `json:"email"`
-	Phone              string  `json:"phone"`
-	Password           string  `json:"password"`
-	InitialDeposit     float64 `json:"initial_deposit"`
+	LegalFirstName     string       `json:"legal_first_name"`
+	LegalLastName      string       `json:"legal_last_name"`
+	DateOfBirth        string       `json:"date_of_birth"`
+	Nationality        string       `json:"nationality"`
+	Email              string       `json:"email"`
+	Phone              string       `json:"phone"`
+	Password           string       `json:"password"`
+	InitialDeposit     domain.Money `json:"initial_deposit"`
 	ResidentialAddress struct {
 		Line1           string `json:"line1"`
 		Line2           string `json:"line2"`
@@ -465,6 +484,14 @@ func statusForError(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, domain.ErrInvalidReviewStatus), errors.Is(err, domain.ErrInvalidRejectionReason):
 		return http.StatusBadRequest
+	case errors.Is(err, domain.ErrIdempotencyKeyRequired), errors.Is(err, domain.ErrInvalidMoney):
+		return http.StatusBadRequest
+	case errors.Is(err, domain.ErrIdempotencyConflict):
+		return http.StatusConflict
+	case errors.Is(err, domain.ErrTransferNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, domain.ErrForbidden):
+		return http.StatusForbidden
 	default:
 		var fundErr *domain.InsufficientFundsError
 		if errors.As(err, &fundErr) {
@@ -475,9 +502,9 @@ func statusForError(err error) int {
 }
 
 type accountDTO struct {
-	ID         string  `json:"id"`
-	Balance    float64 `json:"balance"`
-	EventCount int     `json:"event_count"`
+	ID         string       `json:"id"`
+	Balance    domain.Money `json:"balance"`
+	EventCount int          `json:"event_count"`
 }
 
 func listAccounts(store eventstore.Store) ([]accountDTO, error) {
@@ -499,10 +526,13 @@ func listAccounts(store eventstore.Store) ([]accountDTO, error) {
 }
 
 type eventDTO struct {
-	Seq        int     `json:"seq"`
-	Type       string  `json:"type"`
-	Amount     float64 `json:"amount,omitempty"`
-	OccurredAt string  `json:"occurred_at"`
+	Seq                   int          `json:"seq"`
+	Type                  string       `json:"type"`
+	Amount                domain.Money `json:"amount,omitempty"`
+	TransferID            string       `json:"transfer_id,omitempty"`
+	Purpose               string       `json:"purpose,omitempty"`
+	CounterpartyAccountID string       `json:"counterparty_account_id,omitempty"`
+	OccurredAt            string       `json:"occurred_at"`
 }
 
 func toEventDTOs(events []domain.Event) []eventDTO {
@@ -514,8 +544,10 @@ func toEventDTOs(events []domain.Event) []eventDTO {
 			dto.Amount = typedEvent.InitialBalance
 		case domain.MoneyDebited:
 			dto.Amount = typedEvent.Amount
+			dto.TransferID, dto.Purpose, dto.CounterpartyAccountID = typedEvent.TransferID, typedEvent.Purpose, typedEvent.CounterpartyAccountID
 		case domain.MoneyCredited:
 			dto.Amount = typedEvent.Amount
+			dto.TransferID, dto.Purpose, dto.CounterpartyAccountID = typedEvent.TransferID, typedEvent.Purpose, typedEvent.CounterpartyAccountID
 		}
 		out = append(out, dto)
 	}

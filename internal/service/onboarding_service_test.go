@@ -22,7 +22,7 @@ func validOnboardingCommand() domain.OnboardingCommand {
 			Type: "passport", Number: "P123456", IssuingCountry: "GB",
 		},
 		PassportImage:  []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'},
-		InitialDeposit: 25,
+		InitialDeposit: 2500,
 	}
 }
 
@@ -61,7 +61,7 @@ func TestOnboarding_RejectsInvalidCommands(t *testing.T) {
 		{"bad phone", func(c *domain.OnboardingCommand) { c.Phone = "0812345678" }, "phone"},
 		{"bad country", func(c *domain.OnboardingCommand) { c.Nationality = "GBR" }, "nationality"},
 		{"bad document", func(c *domain.OnboardingCommand) { c.GovernmentDocument.Type = "library_card" }, "government_document.type"},
-		{"small funding", func(c *domain.OnboardingCommand) { c.InitialDeposit = 9.99 }, "initial_deposit"},
+		{"small funding", func(c *domain.OnboardingCommand) { c.InitialDeposit = 999 }, "initial_deposit"},
 		{"missing passport", func(c *domain.OnboardingCommand) { c.PassportImage = nil }, "passport_image"},
 	}
 	for _, tt := range tests {

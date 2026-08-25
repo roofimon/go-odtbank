@@ -41,10 +41,10 @@ func TestWithdrawEndToEnd(t *testing.T) {
 
 	var receipt domain.WithdrawalReceipt
 	decodeResponse(t, response, http.StatusOK, &receipt)
-	if receipt.InitialAccount.Balance != 100 || receipt.FinalAccount.Balance != 60 {
+	if receipt.InitialAccount.Balance != 10000 || receipt.FinalAccount.Balance != 6000 {
 		t.Errorf("balances = %v -> %v, want 100 -> 60", receipt.InitialAccount.Balance, receipt.FinalAccount.Balance)
 	}
-	if receipt.WithdrawalAmount != 40 {
+	if receipt.WithdrawalAmount != 4000 {
 		t.Errorf("withdrawal amount = %v, want 40", receipt.WithdrawalAmount)
 	}
 

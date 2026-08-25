@@ -32,7 +32,7 @@ func TestReviewApprovalCreatesFundedAccountOnce(t *testing.T) {
 		t.Fatalf("accounts=%v", ids)
 	}
 	events, _ := store.Load(ids[0])
-	if got := domain.ReplayAccount(ids[0], events).Balance; got != 25 {
+	if got := domain.ReplayAccount(ids[0], events).Balance; got != 2500 {
 		t.Fatalf("balance=%v", got)
 	}
 	if err := review.Approve(receipt.CustomerID, "adm_1"); !errors.Is(err, domain.ErrApplicationReviewed) {
