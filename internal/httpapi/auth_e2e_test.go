@@ -86,6 +86,17 @@ func TestAuthenticationAndAccountAuthorizationEndToEnd(t *testing.T) {
 		t.Fatalf("passport status=%d type=%s", passportResponse.StatusCode, passportResponse.Header.Get("Content-Type"))
 	}
 	passportResponse.Body.Close()
+	historyRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/admin/accounts/other-account/events", nil)
+	historyRequest.AddCookie(adminCookie)
+	historyResponse, _ := server.Client().Do(historyRequest)
+	var adminHistory struct {
+		AggregateID string `json:"aggregate_id"`
+		EventCount  int    `json:"event_count"`
+	}
+	decodeResponse(t, historyResponse, http.StatusOK, &adminHistory)
+	if adminHistory.AggregateID != "other-account" || adminHistory.EventCount != 1 {
+		t.Fatalf("admin history=%+v", adminHistory)
+	}
 	approve, _ := http.NewRequest(http.MethodPost, server.URL+"/admin/applications/"+onboarded.CustomerID+"/approve", nil)
 	approve.AddCookie(adminCookie)
 	approvedResponse, err := server.Client().Do(approve)

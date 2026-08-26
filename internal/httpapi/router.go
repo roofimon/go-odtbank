@@ -52,6 +52,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.HandleFunc("/withdraw", banking(handleWithdraw(deps.WithdrawService))).Methods(http.MethodPost)
 	router.HandleFunc("/accounts", banking(handleListAccounts(deps.Store))).Methods(http.MethodGet)
 	router.HandleFunc("/accounts/{id}/events", banking(handleAccountEvents(deps.Store))).Methods(http.MethodGet)
+	router.HandleFunc("/admin/accounts/{id}/events", admin(handleAdminAccountEvents(deps.Store))).Methods(http.MethodGet)
 	if deps.ReviewService != nil {
 		router.HandleFunc("/admin/applications", admin(handleApplications(deps.ReviewService))).Methods(http.MethodGet)
 		router.HandleFunc("/admin/applications/{id}", admin(handleApplication(deps.ReviewService))).Methods(http.MethodGet)
@@ -277,6 +278,27 @@ func handleAccountEvents(store eventstore.Store) http.HandlerFunc {
 			"aggregate_id": id,
 			"events":       toEventDTOs(events),
 		})
+	}
+}
+
+func handleAdminAccountEvents(store eventstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(mux.Vars(r)["id"])
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "account id is required")
+			return
+		}
+		events, err := store.Load(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if len(events) == 0 {
+			writeError(w, http.StatusNotFound, domain.ErrAccountNotFound.Error())
+			return
+		}
+		account := domain.ReplayAccount(id, events)
+		writeJSON(w, http.StatusOK, map[string]any{"aggregate_id": id, "balance": account.Balance, "event_count": len(events), "events": toEventDTOs(events)})
 	}
 }
 

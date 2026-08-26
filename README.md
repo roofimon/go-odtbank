@@ -261,6 +261,8 @@ POST /admin/applications/{customer_id}/reject  {"reason":"Passport image is unre
 
 Approval creates and funds the account exactly once. Approval and rejection are terminal; subsequent review attempts return `409`.
 
+The admin dashboard is split into a navigation menu and main content. **Approval** contains sub-menu filters for **Waiting for approval**, **Approved**, and **Rejected** applications. Choose **Query transaction** to inspect any account's balance and grouped transaction history. The same history is available directly from `GET /admin/accounts/{account_id}/events`; customer sessions cannot access this endpoint.
+
 ### Transfer
 
 `POST /transfer`

@@ -2,6 +2,7 @@ import type {
   Account,
   ApplicationDetail,
   ApplicationSummary,
+  AdminAccountHistory,
   AccountsWithMeta,
   DepositReceipt,
   EventLogResponse,
@@ -134,3 +135,4 @@ export function getApplication(id: string): Promise<ApplicationDetail> { return 
 export function approveApplication(id: string): Promise<void> { return request<void>(`/admin/applications/${encodeURIComponent(id)}/approve`, { method: "POST" }); }
 export function rejectApplication(id: string, reason: string): Promise<void> { return request<void>(`/admin/applications/${encodeURIComponent(id)}/reject`, { method: "POST" }, JSON.stringify({ reason })); }
 export async function getPassport(id: string): Promise<Blob> { const response = await fetch(`${API_URL}/admin/applications/${encodeURIComponent(id)}/passport`, { credentials: "include", cache: "no-store" }); if (!response.ok) throw new ApiError(response.status, "Could not load passport image"); return response.blob(); }
+export function getAdminAccountHistory(accountId: string): Promise<AdminAccountHistory> { return request<AdminAccountHistory>(`/admin/accounts/${encodeURIComponent(accountId)}/events`); }

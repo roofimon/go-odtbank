@@ -46,6 +46,8 @@ export type EventLogResponse = {
   events: StoredEvent[];
 };
 
+export type AdminAccountHistory = EventLogResponse & { balance: number; event_count: number };
+
 export type AccountsWithMeta = {
   accounts: Account[];
 };

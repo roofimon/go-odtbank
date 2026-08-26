@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
+
 	"go-odtbank/internal/domain"
 	"go-odtbank/internal/eventstore"
 )
@@ -215,5 +217,24 @@ func TestCORSPreflightAllowsTransferIdempotencyKey(t *testing.T) {
 	}
 	if got := response.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "idempotency-key") {
 		t.Fatalf("allowed headers = %q", got)
+	}
+}
+
+func TestHandleAdminAccountEventsReturnsHistoryAndNotFound(t *testing.T) {
+	store := eventstore.NewMemoryStore()
+	if err := store.Append(domain.AccountOpened{Aggregate: "acc1", Type: "AccountOpened", ID: "acc1", InitialBalance: 10000}, 0); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/admin/accounts/acc1/events", nil), map[string]string{"id": "acc1"})
+	handleAdminAccountEvents(store).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"balance":100.00`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	missing := httptest.NewRecorder()
+	missingRequest := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/admin/accounts/missing/events", nil), map[string]string{"id": "missing"})
+	handleAdminAccountEvents(store).ServeHTTP(missing, missingRequest)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status=%d", missing.Code)
 	}
 }
