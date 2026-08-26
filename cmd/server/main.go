@@ -63,6 +63,11 @@ func main() {
 		log.Fatal("configured store does not support application review")
 	}
 	reviewService := service.NewReviewService(reviewStore)
+	adjustmentStore, ok := store.(domain.AdjustmentStore)
+	if !ok {
+		log.Fatal("configured store does not support adjustments")
+	}
+	adjustmentService := service.NewAdjustmentService(adjustmentStore)
 	if _, memory := store.(*eventstore.MemoryStore); memory {
 		email, password := os.Getenv("ADMIN_EMAIL"), os.Getenv("ADMIN_PASSWORD")
 		if (email == "") != (password == "") {
@@ -88,6 +93,7 @@ func main() {
 		OnboardingService: onboardingService,
 		AuthService:       authService,
 		ReviewService:     reviewService,
+		AdjustmentService: adjustmentService,
 		CookieSecure:      os.Getenv("COOKIE_SECURE") == "true",
 		CORSOrigins:       os.Getenv("CORS_ORIGINS"),
 	})

@@ -3,6 +3,7 @@ import type {
   ApplicationDetail,
   ApplicationSummary,
   AdminAccountHistory,
+  AdjustmentRequest,
   AccountsWithMeta,
   DepositReceipt,
   EventLogResponse,
@@ -136,3 +137,7 @@ export function approveApplication(id: string): Promise<void> { return request<v
 export function rejectApplication(id: string, reason: string): Promise<void> { return request<void>(`/admin/applications/${encodeURIComponent(id)}/reject`, { method: "POST" }, JSON.stringify({ reason })); }
 export async function getPassport(id: string): Promise<Blob> { const response = await fetch(`${API_URL}/admin/applications/${encodeURIComponent(id)}/passport`, { credentials: "include", cache: "no-store" }); if (!response.ok) throw new ApiError(response.status, "Could not load passport image"); return response.blob(); }
 export function getAdminAccountHistory(accountId: string): Promise<AdminAccountHistory> { return request<AdminAccountHistory>(`/admin/accounts/${encodeURIComponent(accountId)}/events`); }
+export function createAdjustment(payload: Partial<AdjustmentRequest>): Promise<AdjustmentRequest> { return request<AdjustmentRequest>("/admin/adjustments", { method: "POST" }, JSON.stringify(payload)); }
+export function getAdjustments(status: string): Promise<AdjustmentRequest[]> { return request<{ adjustments: AdjustmentRequest[] }>(`/admin/adjustments?status=${encodeURIComponent(status)}`).then((result) => result.adjustments); }
+export function approveAdjustment(id: string): Promise<void> { return request<void>(`/admin/adjustments/${encodeURIComponent(id)}/approve`, { method: "POST" }); }
+export function rejectAdjustment(id: string, reason: string): Promise<void> { return request<void>(`/admin/adjustments/${encodeURIComponent(id)}/reject`, { method: "POST" }, JSON.stringify({ reason })); }

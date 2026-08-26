@@ -37,6 +37,10 @@ type MoneyDebited struct {
 	TransferID            string `json:"transfer_id,omitempty"`
 	Purpose               string `json:"purpose,omitempty"`
 	CounterpartyAccountID string `json:"counterparty_account_id,omitempty"`
+	AdjustmentID          string `json:"adjustment_id,omitempty"`
+	AdjustmentReason      string `json:"adjustment_reason,omitempty"`
+	CaseReference         string `json:"case_reference,omitempty"`
+	OriginalReference     string `json:"original_reference,omitempty"`
 }
 
 func (e MoneyDebited) AggregateID() string   { return e.Aggregate }
@@ -55,6 +59,10 @@ type MoneyCredited struct {
 	TransferID            string `json:"transfer_id,omitempty"`
 	Purpose               string `json:"purpose,omitempty"`
 	CounterpartyAccountID string `json:"counterparty_account_id,omitempty"`
+	AdjustmentID          string `json:"adjustment_id,omitempty"`
+	AdjustmentReason      string `json:"adjustment_reason,omitempty"`
+	CaseReference         string `json:"case_reference,omitempty"`
+	OriginalReference     string `json:"original_reference,omitempty"`
 }
 
 func (e MoneyCredited) AggregateID() string   { return e.Aggregate }

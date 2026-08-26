@@ -8,6 +8,8 @@ Account balances are not stored as mutable rows. Each balance is rebuilt by repl
 
 - Submit an individual account application through a public three-step KYC onboarding journey.
 - Review and approve or reject applications in a protected admin area.
+- Create dual-control manual balance corrections and transaction reversals.
+- Query any account's transaction history from the admin console.
 - Log in with an email and password using an HTTP-only server-side session.
 - Transfer money between existing accounts (minimum `1.00`).
 - Deposit into an existing account (minimum `10.00`).
@@ -27,7 +29,8 @@ internal/httpapi
         │
         ├── TransferService ── FeePolicy · TimeService · EventBus
         ├── DepositService
-        └── WithdrawService
+        ├── WithdrawService
+        └── AdjustmentService
                  │
                  ▼
           eventstore.Store
@@ -149,6 +152,14 @@ go run ./cmd/admin
 
 The command prints `admin admin@example.com is ready` when successful. Start or restart the backend with the same `DATABASE_URL`, log in with that identity, and open `http://localhost:3000/admin` to review waiting applications and their passport images. Supplying `ADMIN_EMAIL` and `ADMIN_PASSWORD` to `cmd/server` does not create a PostgreSQL admin; use `cmd/admin` instead.
 
+Create a second administrator with a different email to test adjustment approval. An administrator cannot approve or reject an adjustment they created:
+
+```bash
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' \
+ADMIN_EMAIL='checker@example.com' ADMIN_PASSWORD='another-secure-password' \
+go run ./cmd/admin
+```
+
 ### Login troubleshooting
 
 If login returns `invalid email or password`:
@@ -262,6 +273,42 @@ POST /admin/applications/{customer_id}/reject  {"reason":"Passport image is unre
 Approval creates and funds the account exactly once. Approval and rejection are terminal; subsequent review attempts return `409`.
 
 The admin dashboard is split into a navigation menu and main content. **Approval** contains sub-menu filters for **Waiting for approval**, **Approved**, and **Rejected** applications. Choose **Query transaction** to inspect any account's balance and grouped transaction history. The same history is available directly from `GET /admin/accounts/{account_id}/events`; customer sessions cannot access this endpoint.
+
+### Adjust balances and reverse transactions
+
+The admin console's **Adjustments** area supports manual credits/debits and full transaction reversals. Every request starts in `waiting_for_approval`; a different administrator must approve or reject it. Approval appends auditable ledger events with the case reference and customer-visible reason. Debits cannot overdraw an account, a transaction can be reversed only once, and reversing a transfer restores the original fee to the source account.
+
+```text
+POST /admin/adjustments
+GET  /admin/adjustments?status=waiting_for_approval
+GET  /admin/adjustments/{adjustment_id}
+POST /admin/adjustments/{adjustment_id}/approve
+POST /admin/adjustments/{adjustment_id}/reject
+```
+
+Manual correction request:
+
+```json
+{
+  "type": "manual",
+  "account_id": "acc1",
+  "direction": "credit",
+  "amount": 25,
+  "reason": "Correction for duplicated service fee",
+  "case_reference": "CASE-2026-001"
+}
+```
+
+Transfer reversal request:
+
+```json
+{
+  "type": "reversal",
+  "original_transfer_id": "trf_...",
+  "reason": "Transfer posted to the wrong beneficiary",
+  "case_reference": "CASE-2026-002"
+}
+```
 
 ### Transfer
 

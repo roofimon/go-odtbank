@@ -10,8 +10,12 @@ export type StoredEvent = {
   amount?: number;
   occurred_at: string;
   transfer_id?: string;
-  purpose?: "transfer" | "fee";
+  purpose?: "transfer" | "fee" | "adjustment" | "reversal";
   counterparty_account_id?: string;
+  adjustment_id?: string;
+  adjustment_reason?: string;
+  case_reference?: string;
+  original_reference?: string;
 };
 
 export type AccountRef = {
@@ -86,3 +90,6 @@ export type OnboardingReceipt = {
 
 export type ApplicationSummary = { customer_id: string; legal_first_name: string; legal_last_name: string; email: string; kyc_status: KYCStatus; requested_initial_deposit: number; created_at: string; reviewed_at?: string; rejection_reason?: string };
 export type ApplicationDetail = ApplicationSummary & { date_of_birth: string; nationality: string; phone: string; residential_address: OnboardingRequest["residential_address"]; government_document: OnboardingRequest["government_document"]; passport_image_mime: string };
+
+export type AdjustmentStatus = "waiting_for_approval" | "approved" | "rejected";
+export type AdjustmentRequest = { adjustment_id: string; type: "manual" | "reversal"; status: AdjustmentStatus; account_id: string; direction?: "credit" | "debit" | "reversal"; amount: number; fee?: number; counterparty_account_id?: string; original_transfer_id?: string; original_account_id?: string; original_event_sequence?: number; reason: string; case_reference: string; created_by: string; reviewed_by?: string; rejection_reason?: string; created_at: string; reviewed_at?: string };

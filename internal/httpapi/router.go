@@ -24,6 +24,7 @@ type Dependencies struct {
 	OnboardingService domain.OnboardingService
 	AuthService       domain.AuthService
 	ReviewService     domain.ReviewService
+	AdjustmentService domain.AdjustmentService
 	CookieSecure      bool
 	CORSOrigins       string
 }
@@ -59,6 +60,13 @@ func NewRouter(deps Dependencies) http.Handler {
 		router.HandleFunc("/admin/applications/{id}/passport", admin(handlePassport(deps.ReviewService))).Methods(http.MethodGet)
 		router.HandleFunc("/admin/applications/{id}/approve", admin(handleApprove(deps.ReviewService))).Methods(http.MethodPost)
 		router.HandleFunc("/admin/applications/{id}/reject", admin(handleReject(deps.ReviewService))).Methods(http.MethodPost)
+	}
+	if deps.AdjustmentService != nil {
+		router.HandleFunc("/admin/adjustments", admin(handleCreateAdjustment(deps.AdjustmentService))).Methods(http.MethodPost)
+		router.HandleFunc("/admin/adjustments", admin(handleListAdjustments(deps.AdjustmentService))).Methods(http.MethodGet)
+		router.HandleFunc("/admin/adjustments/{id}", admin(handleGetAdjustment(deps.AdjustmentService))).Methods(http.MethodGet)
+		router.HandleFunc("/admin/adjustments/{id}/approve", admin(handleApproveAdjustment(deps.AdjustmentService))).Methods(http.MethodPost)
+		router.HandleFunc("/admin/adjustments/{id}/reject", admin(handleRejectAdjustment(deps.AdjustmentService))).Methods(http.MethodPost)
 	}
 	return withCORS(router, deps.CORSOrigins)
 }
@@ -402,6 +410,67 @@ func handleReject(s domain.ReviewService) http.HandlerFunc {
 	}
 }
 
+func handleCreateAdjustment(s domain.AdjustmentService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request domain.AdjustmentRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		created, err := s.Create(request, principalFromRequest(r).AdminID)
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, created)
+	}
+}
+func handleListAdjustments(s domain.AdjustmentService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		items, err := s.List(r.URL.Query().Get("status"))
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"adjustments": items})
+	}
+}
+func handleGetAdjustment(s domain.AdjustmentService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		item, err := s.Get(mux.Vars(r)["id"])
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+	}
+}
+func handleApproveAdjustment(s domain.AdjustmentService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Approve(mux.Vars(r)["id"], principalFromRequest(r).AdminID); err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+func handleRejectAdjustment(s domain.AdjustmentService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if err := s.Reject(mux.Vars(r)["id"], principalFromRequest(r).AdminID, request.Reason); err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func principalFromRequest(r *http.Request) *domain.Principal {
 	principal, _ := r.Context().Value(principalContextKey{}).(*domain.Principal)
 	return principal
@@ -514,6 +583,12 @@ func statusForError(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, domain.ErrForbidden):
 		return http.StatusForbidden
+	case errors.Is(err, domain.ErrInvalidAdjustment):
+		return http.StatusBadRequest
+	case errors.Is(err, domain.ErrAdjustmentNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, domain.ErrAdjustmentReviewed), errors.Is(err, domain.ErrSelfApproval), errors.Is(err, domain.ErrAlreadyReversed):
+		return http.StatusConflict
 	default:
 		var fundErr *domain.InsufficientFundsError
 		if errors.As(err, &fundErr) {
@@ -554,6 +629,10 @@ type eventDTO struct {
 	TransferID            string       `json:"transfer_id,omitempty"`
 	Purpose               string       `json:"purpose,omitempty"`
 	CounterpartyAccountID string       `json:"counterparty_account_id,omitempty"`
+	AdjustmentID          string       `json:"adjustment_id,omitempty"`
+	AdjustmentReason      string       `json:"adjustment_reason,omitempty"`
+	CaseReference         string       `json:"case_reference,omitempty"`
+	OriginalReference     string       `json:"original_reference,omitempty"`
 	OccurredAt            string       `json:"occurred_at"`
 }
 
@@ -567,9 +646,11 @@ func toEventDTOs(events []domain.Event) []eventDTO {
 		case domain.MoneyDebited:
 			dto.Amount = typedEvent.Amount
 			dto.TransferID, dto.Purpose, dto.CounterpartyAccountID = typedEvent.TransferID, typedEvent.Purpose, typedEvent.CounterpartyAccountID
+			dto.AdjustmentID, dto.AdjustmentReason, dto.CaseReference, dto.OriginalReference = typedEvent.AdjustmentID, typedEvent.AdjustmentReason, typedEvent.CaseReference, typedEvent.OriginalReference
 		case domain.MoneyCredited:
 			dto.Amount = typedEvent.Amount
 			dto.TransferID, dto.Purpose, dto.CounterpartyAccountID = typedEvent.TransferID, typedEvent.Purpose, typedEvent.CounterpartyAccountID
+			dto.AdjustmentID, dto.AdjustmentReason, dto.CaseReference, dto.OriginalReference = typedEvent.AdjustmentID, typedEvent.AdjustmentReason, typedEvent.CaseReference, typedEvent.OriginalReference
 		}
 		out = append(out, dto)
 	}

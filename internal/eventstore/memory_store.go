@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -12,21 +13,23 @@ import (
 // It is the prototype implementation of Store; the Postgres implementation
 // will satisfy the same interface.
 type MemoryStore struct {
-	mu        sync.RWMutex
-	streams   map[string][]domain.Event
-	customers map[string]domain.Customer
-	admins    map[string]domain.Admin
-	sessions  map[string]domain.Session
-	transfers map[string]domain.TransferRecord
+	mu          sync.RWMutex
+	streams     map[string][]domain.Event
+	customers   map[string]domain.Customer
+	admins      map[string]domain.Admin
+	sessions    map[string]domain.Session
+	transfers   map[string]domain.TransferRecord
+	adjustments map[string]domain.AdjustmentRequest
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		streams:   make(map[string][]domain.Event),
-		customers: make(map[string]domain.Customer),
-		admins:    make(map[string]domain.Admin),
-		sessions:  make(map[string]domain.Session),
-		transfers: make(map[string]domain.TransferRecord),
+		streams:     make(map[string][]domain.Event),
+		customers:   make(map[string]domain.Customer),
+		admins:      make(map[string]domain.Admin),
+		sessions:    make(map[string]domain.Session),
+		transfers:   make(map[string]domain.TransferRecord),
+		adjustments: make(map[string]domain.AdjustmentRequest),
 	}
 }
 
@@ -128,6 +131,151 @@ var _ domain.OnboardingStore = (*MemoryStore)(nil)
 var _ domain.AuthStore = (*MemoryStore)(nil)
 var _ domain.ReviewStore = (*MemoryStore)(nil)
 var _ domain.AtomicTransferStore = (*MemoryStore)(nil)
+var _ domain.AdjustmentStore = (*MemoryStore)(nil)
+
+func (m *MemoryStore) CreateAdjustment(r domain.AdjustmentRequest) (*domain.AdjustmentRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r.Type == domain.AdjustmentManual {
+		if len(m.streams[r.AccountID]) == 0 {
+			return nil, domain.ErrAccountNotFound
+		}
+	} else if r.OriginalTransferID != "" {
+		t, ok := m.transfers[r.OriginalTransferID]
+		if !ok || t.Status != domain.TransferCompleted {
+			return nil, domain.ErrTransferNotFound
+		}
+		for _, a := range m.adjustments {
+			if a.OriginalTransferID == r.OriginalTransferID && a.Status != domain.AdjustmentRejected {
+				return nil, domain.ErrAlreadyReversed
+			}
+		}
+		r.AccountID = t.SourceAccountID
+		r.CounterpartyAccountID = t.DestinationAccountID
+		r.Amount = t.Amount
+		r.Fee = t.Fee
+		r.Direction = "reversal"
+	} else {
+		events := m.streams[r.OriginalAccountID]
+		if r.OriginalEventSequence == nil || *r.OriginalEventSequence < 0 || *r.OriginalEventSequence >= len(events) {
+			return nil, domain.ErrInvalidAdjustment
+		}
+		for _, a := range m.adjustments {
+			if a.OriginalAccountID == r.OriginalAccountID && a.OriginalEventSequence != nil && *a.OriginalEventSequence == *r.OriginalEventSequence && a.Status != domain.AdjustmentRejected {
+				return nil, domain.ErrAlreadyReversed
+			}
+		}
+		switch e := events[*r.OriginalEventSequence].(type) {
+		case domain.MoneyCredited:
+			if e.TransferID != "" || e.Purpose == "fee" || e.AdjustmentID != "" {
+				return nil, domain.ErrInvalidAdjustment
+			}
+			r.AccountID = r.OriginalAccountID
+			r.Amount = e.Amount
+			r.Direction = "debit"
+		case domain.MoneyDebited:
+			if e.TransferID != "" || e.Purpose == "fee" || e.AdjustmentID != "" {
+				return nil, domain.ErrInvalidAdjustment
+			}
+			r.AccountID = r.OriginalAccountID
+			r.Amount = e.Amount
+			r.Direction = "credit"
+		default:
+			return nil, domain.ErrInvalidAdjustment
+		}
+	}
+	m.adjustments[r.ID] = r
+	copy := r
+	return &copy, nil
+}
+func (m *MemoryStore) ListAdjustments(status string) ([]domain.AdjustmentRequest, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := []domain.AdjustmentRequest{}
+	for _, r := range m.adjustments {
+		if r.Status == status {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+func (m *MemoryStore) GetAdjustment(id string) (*domain.AdjustmentRequest, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, ok := m.adjustments[id]
+	if !ok {
+		return nil, domain.ErrAdjustmentNotFound
+	}
+	return &r, nil
+}
+func (m *MemoryStore) ApproveAdjustment(id, adminID string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.adjustments[id]
+	if !ok {
+		return domain.ErrAdjustmentNotFound
+	}
+	if r.Status != domain.AdjustmentWaiting {
+		return domain.ErrAdjustmentReviewed
+	}
+	if r.CreatedBy == adminID {
+		return domain.ErrSelfApproval
+	}
+	ref := r.OriginalTransferID
+	if ref == "" && r.OriginalEventSequence != nil {
+		ref = r.OriginalAccountID + ":" + fmt.Sprint(*r.OriginalEventSequence)
+	}
+	appendCredit := func(account string, amount domain.Money, counterparty string) {
+		events := m.streams[account]
+		m.streams[account] = append(events, domain.MoneyCredited{Aggregate: account, Type: "MoneyCredited", Seq: len(events), Occurred: at, ID: account, Amount: amount, Purpose: map[bool]string{true: "reversal", false: "adjustment"}[r.Type == domain.AdjustmentReversal], CounterpartyAccountID: counterparty, AdjustmentID: r.ID, AdjustmentReason: r.Reason, CaseReference: r.CaseReference, OriginalReference: ref})
+	}
+	appendDebit := func(account string, amount domain.Money, counterparty string) error {
+		events := m.streams[account]
+		if domain.ReplayAccount(account, events).Balance < amount {
+			return domain.NewInsufficientFundsError(domain.ReplayAccount(account, events), amount)
+		}
+		m.streams[account] = append(events, domain.MoneyDebited{Aggregate: account, Type: "MoneyDebited", Seq: len(events), Occurred: at, ID: account, Amount: amount, Purpose: map[bool]string{true: "reversal", false: "adjustment"}[r.Type == domain.AdjustmentReversal], CounterpartyAccountID: counterparty, AdjustmentID: r.ID, AdjustmentReason: r.Reason, CaseReference: r.CaseReference, OriginalReference: ref})
+		return nil
+	}
+	if r.OriginalTransferID != "" {
+		if err := appendDebit(r.CounterpartyAccountID, r.Amount, r.AccountID); err != nil {
+			return err
+		}
+		appendCredit(r.AccountID, r.Amount+r.Fee, r.CounterpartyAccountID)
+	} else if r.Direction == "credit" {
+		appendCredit(r.AccountID, r.Amount, "")
+	} else {
+		if err := appendDebit(r.AccountID, r.Amount, ""); err != nil {
+			return err
+		}
+	}
+	r.Status = domain.AdjustmentApproved
+	r.ReviewedBy = adminID
+	r.ReviewedAt = &at
+	m.adjustments[id] = r
+	return nil
+}
+func (m *MemoryStore) RejectAdjustment(id, adminID, reason string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.adjustments[id]
+	if !ok {
+		return domain.ErrAdjustmentNotFound
+	}
+	if r.Status != domain.AdjustmentWaiting {
+		return domain.ErrAdjustmentReviewed
+	}
+	if r.CreatedBy == adminID {
+		return domain.ErrSelfApproval
+	}
+	r.Status = domain.AdjustmentRejected
+	r.ReviewedBy = adminID
+	r.RejectionReason = reason
+	r.ReviewedAt = &at
+	m.adjustments[id] = r
+	return nil
+}
 
 func (m *MemoryStore) ExecuteTransfer(record domain.TransferRecord) (*domain.TransferRecord, bool, error) {
 	m.mu.Lock()

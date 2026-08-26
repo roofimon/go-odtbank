@@ -6,9 +6,10 @@ import { useRouter } from "next/navigation";
 import { approveApplication, getApplication, getApplications, getPassport, logout, rejectApplication } from "../lib/api";
 import type { ApplicationDetail, ApplicationSummary, KYCStatus } from "../lib/types";
 import { AdminTransactionSearch } from "./admin-transaction-search";
-import { AdminNavigationMenu, type AdminFeature } from "./admin-navigation-menu";
+import { AdminNavigationMenu, type AdminFeature, type AdjustmentFeature } from "./admin-navigation-menu";
+import { AdminAdjustments } from "./admin-adjustments";
 
-export function AdminDashboard({ initialItems }: { initialItems: ApplicationSummary[] }) {
+export function AdminDashboard({ initialItems, adminId }: { initialItems: ApplicationSummary[]; adminId: string }) {
   const router = useRouter();
   const [status, setStatus] = useState<KYCStatus>("waiting_for_approval");
   const [items, setItems] = useState(initialItems);
@@ -18,6 +19,7 @@ export function AdminDashboard({ initialItems }: { initialItems: ApplicationSumm
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [activeFeature, setActiveFeature] = useState<AdminFeature>("approval");
+  const [activeAdjustment, setActiveAdjustment] = useState<AdjustmentFeature>("create");
 
   async function load(nextStatus = status) {
     setError(null);
@@ -38,9 +40,9 @@ export function AdminDashboard({ initialItems }: { initialItems: ApplicationSumm
   }
 
   return <div className="min-h-screen lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]">
-    <AdminNavigationMenu activeFeature={activeFeature} activeStatus={status} onSelect={setActiveFeature} onStatusSelect={(nextStatus) => { setStatus(nextStatus); void load(nextStatus); }} onLogout={async () => { await logout(); router.push("/login"); router.refresh(); }} />
+    <AdminNavigationMenu activeFeature={activeFeature} activeStatus={status} activeAdjustment={activeAdjustment} onSelect={setActiveFeature} onStatusSelect={(nextStatus) => { setStatus(nextStatus); void load(nextStatus); }} onAdjustmentSelect={setActiveAdjustment} onLogout={async () => { await logout(); router.push("/login"); router.refresh(); }} />
     <main className="min-w-0 px-4 py-6 sm:px-6 sm:py-8 lg:px-8"><div className="mx-auto w-full max-w-6xl">
-    <header><p className="text-xs font-semibold uppercase tracking-wide text-brand">Administration</p><h1 className="mt-1 text-3xl font-semibold text-text">{activeFeature === "approval" ? "Application approval" : "Query transaction history"}</h1><p className="mt-1 text-sm text-text-2">{activeFeature === "approval" ? "Review submitted customer identity applications." : "Inspect any account's balance and event timeline."}</p></header>
+    <header><p className="text-xs font-semibold uppercase tracking-wide text-brand">Administration</p><h1 className="mt-1 text-3xl font-semibold text-text">{activeFeature === "approval" ? "Application approval" : activeFeature === "query-transaction" ? "Query transaction history" : "Adjustments"}</h1><p className="mt-1 text-sm text-text-2">{activeFeature === "approval" ? "Review submitted customer identity applications." : activeFeature === "query-transaction" ? "Inspect any account's balance and event timeline." : "Create and review dual-control balance corrections."}</p></header>
     {activeFeature === "approval" && <>
     {error && <p className="mt-4 text-sm text-negative">{error}</p>}
     <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_1.4fr]">
@@ -49,6 +51,7 @@ export function AdminDashboard({ initialItems }: { initialItems: ApplicationSumm
     </div>
     </>}
     {activeFeature === "query-transaction" && <AdminTransactionSearch />}
+    {activeFeature === "adjustments" && <AdminAdjustments key={activeAdjustment} mode={activeAdjustment} adminId={adminId} />}
     </div></main>
   </div>;
 }

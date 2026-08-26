@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -236,6 +237,244 @@ func (s *PostgresStore) RejectApplication(id, adminID, reason string, at time.Ti
 
 var _ domain.ReviewStore = (*PostgresStore)(nil)
 var _ domain.AtomicTransferStore = (*PostgresStore)(nil)
+var _ domain.AdjustmentStore = (*PostgresStore)(nil)
+
+func (s *PostgresStore) CreateAdjustment(r domain.AdjustmentRequest) (*domain.AdjustmentRequest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if r.Type == domain.AdjustmentManual {
+		events, err := s.Load(r.AccountID)
+		if err != nil {
+			return nil, err
+		}
+		if len(events) == 0 {
+			return nil, domain.ErrAccountNotFound
+		}
+	} else if r.OriginalTransferID != "" {
+		t, err := s.FindTransfer(r.OriginalTransferID)
+		if err != nil || t.Status != domain.TransferCompleted {
+			return nil, domain.ErrTransferNotFound
+		}
+		var exists bool
+		if err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM adjustment_requests WHERE original_transfer_id=$1 AND status<>'rejected')`, r.OriginalTransferID).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, domain.ErrAlreadyReversed
+		}
+		r.AccountID = t.SourceAccountID
+		r.CounterpartyAccountID = t.DestinationAccountID
+		r.Amount = t.Amount
+		r.Fee = t.Fee
+		r.Direction = "reversal"
+	} else {
+		events, err := s.Load(r.OriginalAccountID)
+		if err != nil {
+			return nil, err
+		}
+		if r.OriginalEventSequence == nil || *r.OriginalEventSequence < 0 || *r.OriginalEventSequence >= len(events) {
+			return nil, domain.ErrInvalidAdjustment
+		}
+		var exists bool
+		if err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM adjustment_requests WHERE original_account_id=$1 AND original_event_sequence=$2 AND status<>'rejected')`, r.OriginalAccountID, *r.OriginalEventSequence).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, domain.ErrAlreadyReversed
+		}
+		switch e := events[*r.OriginalEventSequence].(type) {
+		case domain.MoneyCredited:
+			if e.TransferID != "" || e.Purpose == "fee" || e.AdjustmentID != "" {
+				return nil, domain.ErrInvalidAdjustment
+			}
+			r.AccountID = r.OriginalAccountID
+			r.Amount = e.Amount
+			r.Direction = "debit"
+		case domain.MoneyDebited:
+			if e.TransferID != "" || e.Purpose == "fee" || e.AdjustmentID != "" {
+				return nil, domain.ErrInvalidAdjustment
+			}
+			r.AccountID = r.OriginalAccountID
+			r.Amount = e.Amount
+			r.Direction = "credit"
+		default:
+			return nil, domain.ErrInvalidAdjustment
+		}
+	}
+	var seq any
+	if r.OriginalEventSequence != nil {
+		seq = *r.OriginalEventSequence
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO adjustment_requests(id,adjustment_type,status,account_id,direction,amount_minor,fee_minor,counterparty_account_id,original_transfer_id,original_account_id,original_event_sequence,reason,case_reference,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),$11,$12,$13,$14,$15)`, r.ID, r.Type, r.Status, r.AccountID, r.Direction, int64(r.Amount), int64(r.Fee), r.CounterpartyAccountID, r.OriginalTransferID, r.OriginalAccountID, seq, r.Reason, r.CaseReference, r.CreatedBy, r.CreatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && (pgErr.ConstraintName == "adjustment_requests_active_transfer_reversal_idx" || pgErr.ConstraintName == "adjustment_requests_active_event_reversal_idx") {
+			return nil, domain.ErrAlreadyReversed
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+func scanAdjustment(row pgx.Row) (*domain.AdjustmentRequest, error) {
+	var r domain.AdjustmentRequest
+	var seq *int64
+	err := row.Scan(&r.ID, &r.Type, &r.Status, &r.AccountID, &r.Direction, &r.Amount, &r.Fee, &r.CounterpartyAccountID, &r.OriginalTransferID, &r.OriginalAccountID, &seq, &r.Reason, &r.CaseReference, &r.CreatedBy, &r.ReviewedBy, &r.RejectionReason, &r.CreatedAt, &r.ReviewedAt)
+	if seq != nil {
+		v := int(*seq)
+		r.OriginalEventSequence = &v
+	}
+	return &r, err
+}
+
+const adjustmentColumns = `id,adjustment_type,status,account_id,direction,amount_minor,fee_minor,counterparty_account_id,COALESCE(original_transfer_id,''),COALESCE(original_account_id,''),original_event_sequence,reason,case_reference,created_by,COALESCE(reviewed_by,''),rejection_reason,created_at,reviewed_at`
+
+func (s *PostgresStore) GetAdjustment(id string) (*domain.AdjustmentRequest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r, err := scanAdjustment(s.pool.QueryRow(ctx, `SELECT `+adjustmentColumns+` FROM adjustment_requests WHERE id=$1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrAdjustmentNotFound
+	}
+	return r, err
+}
+func (s *PostgresStore) ListAdjustments(status string) ([]domain.AdjustmentRequest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.pool.Query(ctx, `SELECT `+adjustmentColumns+` FROM adjustment_requests WHERE status=$1 ORDER BY created_at`, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.AdjustmentRequest{}
+	for rows.Next() {
+		r, scanErr := scanAdjustment(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+func (s *PostgresStore) ApproveAdjustment(id, adminID string, at time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	r, err := scanAdjustment(tx.QueryRow(ctx, `SELECT `+adjustmentColumns+` FROM adjustment_requests WHERE id=$1 FOR UPDATE`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrAdjustmentNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if r.Status != domain.AdjustmentWaiting {
+		return domain.ErrAdjustmentReviewed
+	}
+	if r.CreatedBy == adminID {
+		return domain.ErrSelfApproval
+	}
+	accounts := []string{r.AccountID}
+	if r.CounterpartyAccountID != "" {
+		accounts = append(accounts, r.CounterpartyAccountID)
+	}
+	sort.Strings(accounts)
+	for _, account := range accounts {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, account); err != nil {
+			return err
+		}
+	}
+	if r.Type == domain.AdjustmentReversal {
+		var alreadyApproved bool
+		if r.OriginalTransferID != "" {
+			err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM adjustment_requests WHERE id<>$1 AND original_transfer_id=$2 AND status='approved')`, r.ID, r.OriginalTransferID).Scan(&alreadyApproved)
+		} else {
+			err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM adjustment_requests WHERE id<>$1 AND original_account_id=$2 AND original_event_sequence=$3 AND status='approved')`, r.ID, r.OriginalAccountID, *r.OriginalEventSequence).Scan(&alreadyApproved)
+		}
+		if err != nil {
+			return err
+		}
+		if alreadyApproved {
+			return domain.ErrAlreadyReversed
+		}
+	}
+	ref := r.OriginalTransferID
+	if ref == "" && r.OriginalEventSequence != nil {
+		ref = fmt.Sprintf("%s:%d", r.OriginalAccountID, *r.OriginalEventSequence)
+	}
+	purpose := "adjustment"
+	if r.Type == domain.AdjustmentReversal {
+		purpose = "reversal"
+	}
+	credit := func(account string, amount domain.Money, counterparty string) error {
+		events, e := loadEventsTx(ctx, tx, account)
+		if e != nil {
+			return e
+		}
+		return insertEventTx(ctx, tx, domain.MoneyCredited{Aggregate: account, Type: "MoneyCredited", Seq: len(events), Occurred: at, ID: account, Amount: amount, Purpose: purpose, CounterpartyAccountID: counterparty, AdjustmentID: r.ID, AdjustmentReason: r.Reason, CaseReference: r.CaseReference, OriginalReference: ref})
+	}
+	debit := func(account string, amount domain.Money, counterparty string) error {
+		events, e := loadEventsTx(ctx, tx, account)
+		if e != nil {
+			return e
+		}
+		a := domain.ReplayAccount(account, events)
+		if a.Balance < amount {
+			return domain.NewInsufficientFundsError(a, amount)
+		}
+		return insertEventTx(ctx, tx, domain.MoneyDebited{Aggregate: account, Type: "MoneyDebited", Seq: len(events), Occurred: at, ID: account, Amount: amount, Purpose: purpose, CounterpartyAccountID: counterparty, AdjustmentID: r.ID, AdjustmentReason: r.Reason, CaseReference: r.CaseReference, OriginalReference: ref})
+	}
+	if r.OriginalTransferID != "" {
+		if err = debit(r.CounterpartyAccountID, r.Amount, r.AccountID); err != nil {
+			return err
+		}
+		if err = credit(r.AccountID, r.Amount+r.Fee, r.CounterpartyAccountID); err != nil {
+			return err
+		}
+	} else if r.Direction == "credit" {
+		err = credit(r.AccountID, r.Amount, "")
+	} else {
+		err = debit(r.AccountID, r.Amount, "")
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE adjustment_requests SET status=$2,reviewed_by=$3,reviewed_at=$4 WHERE id=$1`, id, domain.AdjustmentApproved, adminID, at)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+func (s *PostgresStore) RejectAdjustment(id, adminID, reason string, at time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var status, maker string
+	err = tx.QueryRow(ctx, `SELECT status,created_by FROM adjustment_requests WHERE id=$1 FOR UPDATE`, id).Scan(&status, &maker)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrAdjustmentNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != domain.AdjustmentWaiting {
+		return domain.ErrAdjustmentReviewed
+	}
+	if maker == adminID {
+		return domain.ErrSelfApproval
+	}
+	_, err = tx.Exec(ctx, `UPDATE adjustment_requests SET status=$2,reviewed_by=$3,rejection_reason=$4,reviewed_at=$5 WHERE id=$1`, id, domain.AdjustmentRejected, adminID, reason, at)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
 
 func (s *PostgresStore) ExecuteTransfer(record domain.TransferRecord) (*domain.TransferRecord, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
