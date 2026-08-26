@@ -92,11 +92,15 @@ npm run dev
 
 Open `http://localhost:3000/onboarding` to submit an application, then log in at `http://localhost:3000/login`. Customers see a waiting page until an administrator approves them. Approval creates the account and activates Transfer, Deposit, Withdraw, and Transaction history.
 
-For an in-memory demo, start the server with a development admin:
+For an in-memory demo, create the development admin by setting both variables when the backend starts:
 
 ```bash
-ADMIN_EMAIL='admin@example.com' ADMIN_PASSWORD='change-this-password' go run ./cmd/server
+ADMIN_EMAIL='admin@example.com' \
+ADMIN_PASSWORD='change-this-password' \
+go run ./cmd/server
 ```
+
+If the backend is already running, stop it and run the command above again. Admin variables are read only at startup. Log in at `http://localhost:3000/login` with `admin@example.com` and `change-this-password`, then open `/admin` to approve the customer application. The two automatically seeded accounts, `acc1` and `acc2`, are backend fixtures and cannot log in.
 
 The browser calls `http://localhost:8080` by default. Override it when needed:
 
@@ -130,6 +134,7 @@ Equivalent Make targets:
 | `make migrate`      | Apply all migrations.                        |
 | `make migrate-down` | Roll back one migration.                     |
 | `make run`          | Run the backend using the default local DSN. |
+| `make admin`        | Create or update an admin using `ADMIN_*`.   |
 | `make down`         | Stop the containers.                         |
 
 PostgreSQL persists data in the `postgres-data` Docker volume. Use `docker compose down -v` only when you also want to remove that data.
@@ -142,7 +147,17 @@ ADMIN_EMAIL='admin@example.com' ADMIN_PASSWORD='change-this-password' \
 go run ./cmd/admin
 ```
 
-Log in with that identity and open `http://localhost:3000/admin` to review waiting applications and their passport images.
+The command prints `admin admin@example.com is ready` when successful. Start or restart the backend with the same `DATABASE_URL`, log in with that identity, and open `http://localhost:3000/admin` to review waiting applications and their passport images. Supplying `ADMIN_EMAIL` and `ADMIN_PASSWORD` to `cmd/server` does not create a PostgreSQL admin; use `cmd/admin` instead.
+
+### Login troubleshooting
+
+If login returns `invalid email or password`:
+
+- Confirm whether the backend uses memory or PostgreSQL by checking whether `DATABASE_URL` is set.
+- In memory mode, stop and restart `cmd/server` with both `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Restarting without them removes the in-memory admin.
+- In PostgreSQL mode, apply all migrations and run `cmd/admin` with the same `DATABASE_URL` used by the server.
+- Use the exact normalized email and password. Passwords contain 10 to 128 characters.
+- Seeded accounts `acc1` and `acc2` have no email or password. Create a customer through `/onboarding`, approve it as an admin, then log in with the submitted customer credentials.
 
 ### Event schema
 

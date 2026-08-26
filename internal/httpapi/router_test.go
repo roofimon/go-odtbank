@@ -202,3 +202,18 @@ func onboardingMultipartRequest(t *testing.T, payload string) *http.Request {
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	return request
 }
+
+func TestCORSPreflightAllowsTransferIdempotencyKey(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodOptions, "/transfer", nil)
+	request.Header.Set("Origin", "http://localhost:3000")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request.Header.Set("Access-Control-Request-Headers", "content-type,idempotency-key")
+	withCORS(http.NotFoundHandler(), "http://localhost:3000").ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "idempotency-key") {
+		t.Fatalf("allowed headers = %q", got)
+	}
+}
