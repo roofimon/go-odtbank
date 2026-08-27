@@ -3,7 +3,7 @@ DSN ?= postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable
 .PHONY: up down migrate migrate-down run admin test build vet web-dev web-test
 
 up:
-	docker compose up -d postgres
+	docker compose up -d postgres minio
 
 down:
 	docker compose down
@@ -24,7 +24,7 @@ test:
 	go test ./cmd/... ./internal/...
 
 run:
-	DATABASE_URL=$(DSN) go run ./cmd/server
+	DATABASE_URL=$(DSN) MINIO_ENDPOINT=localhost:9000 go run ./cmd/server
 
 admin:
 	DATABASE_URL=$(DSN) go run ./cmd/admin

@@ -1,12 +1,13 @@
 # go-odtbank
 
-An event-sourced banking demo built with Go, PostgreSQL, and Next.js. It supports public onboarding, session-based login, transfers, deposits, withdrawals, balances, and per-account transaction history.
+An event-sourced banking demo built with Go, PostgreSQL, MinIO, and Next.js. It supports public onboarding, session-based login, transfers, deposits, withdrawals, balances, and per-account transaction history.
 
 Account balances are not stored as mutable rows. Each balance is rebuilt by replaying an append-only stream of `AccountOpened`, `MoneyCredited`, and `MoneyDebited` events.
 
 ## Features
 
 - Submit an individual account application through a public three-step KYC onboarding journey.
+- Store submitted passport images in a private MinIO object-storage bucket.
 - Review and approve or reject applications in a protected admin area.
 - Create dual-control manual balance corrections and transaction reversals.
 - Query any account's transaction history from the admin console.
@@ -62,7 +63,7 @@ web/                    Next.js dashboard and typed API client
 
 - Go `1.27.0` or newer, as declared in `go.mod`.
 - Node.js and npm for the dashboard.
-- Docker with Docker Compose for the PostgreSQL development path.
+- Docker with Docker Compose for the PostgreSQL and MinIO development path.
 
 ## Quick start
 
@@ -115,10 +116,10 @@ The backend accepts credentialed browser requests through its CORS middleware. S
 
 ## PostgreSQL development
 
-Start PostgreSQL and apply the migration:
+Start PostgreSQL and MinIO, then apply the migrations:
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres minio
 docker compose run --rm migrate up
 ```
 
@@ -126,6 +127,7 @@ Run the backend against it:
 
 ```bash
 DATABASE_URL='postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable' \
+MINIO_ENDPOINT='localhost:9000' \
   go run ./cmd/server
 ```
 
@@ -133,7 +135,7 @@ Equivalent Make targets:
 
 | Command             | Purpose                                      |
 | ------------------- | -------------------------------------------- |
-| `make up`           | Start PostgreSQL.                            |
+| `make up`           | Start PostgreSQL and MinIO.                  |
 | `make migrate`      | Apply all migrations.                        |
 | `make migrate-down` | Roll back one migration.                     |
 | `make run`          | Run the backend using the default local DSN. |
@@ -141,6 +143,18 @@ Equivalent Make targets:
 | `make down`         | Stop the containers.                         |
 
 PostgreSQL persists data in the `postgres-data` Docker volume. Use `docker compose down -v` only when you also want to remove that data.
+
+MinIO persists passport objects in the `minio-data` volume. Its API is available at `http://localhost:9000` and its development console at `http://localhost:9001`. The default local credentials are `minioadmin` / `minioadmin`; change them outside local development. The backend creates the private `odtbank-passports` bucket when it starts.
+
+| Environment variable | Default             | Purpose                                  |
+| -------------------- | ------------------- | ---------------------------------------- |
+| `MINIO_ENDPOINT`     | `localhost:9000`    | MinIO/S3-compatible endpoint.            |
+| `MINIO_ACCESS_KEY`   | `minioadmin`        | Object-storage access key.               |
+| `MINIO_SECRET_KEY`   | `minioadmin`        | Object-storage secret key.               |
+| `MINIO_BUCKET`       | `odtbank-passports` | Private passport-image bucket.           |
+| `MINIO_USE_SSL`      | `false`             | Set to `true` for an HTTPS endpoint.     |
+
+When PostgreSQL is enabled, onboarding uploads the validated image to MinIO first and stores only its object key and MIME type in the customer row. If the database write fails, the uploaded object is removed. Existing images from earlier migrations remain readable from the legacy `BYTEA` field. In-memory mode remains self-contained and stores images only for the lifetime of the process.
 
 Create or update a PostgreSQL admin after applying all migrations:
 
@@ -247,7 +261,7 @@ Successful onboarding returns `201`:
 }
 ```
 
-The same normalized email or government document cannot be onboarded twice; duplicates return `409`. PostgreSQL requires migrations through `0005_reliable_transfers`. Passport images are available only to authenticated administrators and are never included in account events.
+The same normalized email or government document cannot be onboarded twice; duplicates return `409`. PostgreSQL requires all migrations, including `0007_passport_object_storage`. Passport images are available only through the authenticated administrator endpoint, remain private in MinIO, and are never included in account events.
 
 ### Log in and out
 
@@ -453,7 +467,7 @@ npm run build
 ## Current limitations
 
 - KYC decisions are manual demo decisions; there is no identity provider or sanctions screening.
-- Customer KYC is stored without application-level field encryption. Never submit real personal data to this demo.
+- Customer KYC fields and passport objects are stored without application-level encryption. Never submit real personal data to this demo.
 - Sessions have no rotation, device management, password reset, email verification, or rate limiting.
 - Money is represented internally as signed 64-bit minor units for one implicit two-decimal currency; multi-currency is not supported.
 - Transfer workflow records are retained indefinitely and there is no pending-transfer reconciliation worker.

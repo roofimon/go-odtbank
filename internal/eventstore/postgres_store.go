@@ -22,11 +22,22 @@ import (
 // primary key: a duplicate insert is silently skipped by ON CONFLICT DO NOTHING,
 // and we surface that as ErrConcurrencyConflict.
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool            *pgxpool.Pool
+	passportObjects PassportObjectStore
 }
 
-func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{pool: pool}
+type PassportObjectStore interface {
+	Put(ctx context.Context, key string, body []byte, contentType string) error
+	Get(ctx context.Context, key string) ([]byte, error)
+	Delete(ctx context.Context, key string) error
+}
+
+func NewPostgresStore(pool *pgxpool.Pool, passportObjects ...PassportObjectStore) *PostgresStore {
+	store := &PostgresStore{pool: pool}
+	if len(passportObjects) > 0 {
+		store.passportObjects = passportObjects[0]
+	}
+	return store
 }
 
 // Close releases the underlying connection pool.
@@ -37,11 +48,31 @@ func (s *PostgresStore) Close() {
 func (s *PostgresStore) CreateCustomerApplication(customer domain.Customer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	objectKey := ""
+	passportImage := customer.PassportImage
+	if s.passportObjects != nil {
+		objectKey = "passports/" + customer.ID
+		if err := s.passportObjects.Put(ctx, objectKey, customer.PassportImage, customer.PassportImageMIME); err != nil {
+			return err
+		}
+		passportImage = []byte{}
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		if objectKey != "" {
+			_ = s.passportObjects.Delete(context.Background(), objectKey)
+		}
 		return fmt.Errorf("eventstore: begin onboarding: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	committed := false
+	defer func() {
+		if objectKey != "" && !committed {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanupCancel()
+			_ = s.passportObjects.Delete(cleanupCtx, objectKey)
+		}
+	}()
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO customers (
@@ -49,16 +80,16 @@ func (s *PostgresStore) CreateCustomerApplication(customer domain.Customer) erro
 			nationality, email, phone, password_hash, address_line1, address_line2, city,
 			state_or_province, postal_code, country, document_type,
 			document_number, document_issuing_country, passport_image,
-			passport_image_mime, kyc_status, requested_initial_deposit, created_at
-		) VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+			passport_image_mime, passport_object_key, kyc_status, requested_initial_deposit, created_at
+		) VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 	`, customer.ID, customer.LegalFirstName, customer.LegalLastName,
 		customer.DateOfBirth, customer.Nationality, customer.Email, customer.Phone, customer.PasswordHash,
 		customer.ResidentialAddress.Line1, customer.ResidentialAddress.Line2,
 		customer.ResidentialAddress.City, customer.ResidentialAddress.StateOrProvince,
 		customer.ResidentialAddress.PostalCode, customer.ResidentialAddress.Country,
 		customer.GovernmentDocument.Type, customer.GovernmentDocument.Number,
-		customer.GovernmentDocument.IssuingCountry, customer.PassportImage,
-		customer.PassportImageMIME, customer.KYCStatus, customer.RequestedDeposit, customer.CreatedAt)
+		customer.GovernmentDocument.IssuingCountry, passportImage,
+		customer.PassportImageMIME, objectKey, customer.KYCStatus, customer.RequestedDeposit, customer.CreatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -69,6 +100,7 @@ func (s *PostgresStore) CreateCustomerApplication(customer domain.Customer) erro
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("eventstore: commit onboarding: %w", err)
 	}
+	committed = true
 	return nil
 }
 
@@ -174,12 +206,24 @@ func (s *PostgresStore) GetPassportImage(id string) ([]byte, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var b []byte
-	var mime string
-	err := s.pool.QueryRow(ctx, `SELECT passport_image,passport_image_mime FROM customers WHERE id=$1`, id).Scan(&b, &mime)
+	var mime, objectKey string
+	err := s.pool.QueryRow(ctx, `SELECT passport_image,passport_image_mime,passport_object_key FROM customers WHERE id=$1`, id).Scan(&b, &mime, &objectKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", domain.ErrApplicationNotFound
 	}
-	return b, mime, err
+	if err != nil {
+		return nil, "", err
+	}
+	if objectKey != "" {
+		if s.passportObjects == nil {
+			return nil, "", errors.New("passport object storage is not configured")
+		}
+		b, err = s.passportObjects.Get(ctx, objectKey)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	return b, mime, nil
 }
 func (s *PostgresStore) ApproveApplication(id, adminID, accountID string, at time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

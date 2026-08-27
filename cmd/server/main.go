@@ -15,6 +15,7 @@ import (
 	"go-odtbank/internal/eventbus"
 	"go-odtbank/internal/eventstore"
 	"go-odtbank/internal/httpapi"
+	"go-odtbank/internal/objectstore"
 	"go-odtbank/internal/policy"
 	"go-odtbank/internal/service"
 )
@@ -131,7 +132,24 @@ func openStore(ctx context.Context) (eventstore.Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	return eventstore.NewPostgresStore(pool), nil
+	endpoint := envOrDefault("MINIO_ENDPOINT", "localhost:9000")
+	accessKey := envOrDefault("MINIO_ACCESS_KEY", "minioadmin")
+	secretKey := envOrDefault("MINIO_SECRET_KEY", "minioadmin")
+	bucket := envOrDefault("MINIO_BUCKET", "odtbank-passports")
+	passports, err := objectstore.NewMinIOStore(ctx, endpoint, accessKey, secretKey, bucket, os.Getenv("MINIO_USE_SSL") == "true")
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	fmt.Printf("[store] passport images use MinIO bucket %s\n", bucket)
+	return eventstore.NewPostgresStore(pool, passports), nil
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func closeStore(store eventstore.Store) {
