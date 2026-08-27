@@ -46,7 +46,8 @@ export function AccountsTable({ accounts, selectedId, onSelect }: Props) {
                 </div>
               </div>
               <div className="font-mono text-base font-medium tabular-nums text-text">
-                {formatMoney(a.balance)}
+                <div>{formatMoney(a.available_balance)}</div>
+                {a.reserved_balance > 0 && <div className="text-right text-xs font-normal text-warning">{formatMoney(a.reserved_balance)} reserved</div>}
               </div>
             </button>
           </li>

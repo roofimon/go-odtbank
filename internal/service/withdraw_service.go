@@ -12,6 +12,9 @@ const minimumWithdrawAmount domain.Money = 1000
 type WithdrawService struct {
 	eventStore eventstore.Store
 }
+type atomicAvailableWithdrawer interface {
+	WithdrawAvailable(accountID string, amount domain.Money, at time.Time) (*domain.Account, *domain.Account, error)
+}
 
 func NewWithdrawService(store eventstore.Store) *WithdrawService {
 	return &WithdrawService{eventStore: store}
@@ -20,6 +23,13 @@ func NewWithdrawService(store eventstore.Store) *WithdrawService {
 func (s *WithdrawService) Withdraw(amount domain.Money, accountID string) (*domain.WithdrawalReceipt, error) {
 	if amount < minimumWithdrawAmount {
 		return nil, domain.ErrInvalidWithdrawAmount
+	}
+	if atomic, ok := s.eventStore.(atomicAvailableWithdrawer); ok {
+		initial, final, err := atomic.WithdrawAvailable(accountID, amount, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		return &domain.WithdrawalReceipt{InitialAccount: initial, FinalAccount: final, WithdrawalAmount: amount}, nil
 	}
 
 	events, err := s.eventStore.Load(accountID)
@@ -31,7 +41,7 @@ func (s *WithdrawService) Withdraw(amount domain.Money, accountID string) (*doma
 	}
 
 	initial := domain.ReplayAccount(accountID, events)
-	if initial.Balance < amount {
+	if initial.AvailableBalance < amount {
 		return nil, domain.NewInsufficientFundsError(initial, amount)
 	}
 

@@ -94,7 +94,11 @@ func handleTransfer(transferService domain.TransferService) http.HandlerFunc {
 			writeError(w, statusForError(err), err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		status := http.StatusAccepted
+		if receipt.Status != domain.TransferPending {
+			status = http.StatusOK
+		}
+		writeJSON(w, status, map[string]any{
 			"TransferID":           receipt.TransferID,
 			"Status":               receipt.Status,
 			"InitialSourceAccount": receipt.InitialSourceAccount,
@@ -102,6 +106,7 @@ func handleTransfer(transferService domain.TransferService) http.HandlerFunc {
 			"DestinationAccountID": req.DestID,
 			"TransferAmount":       receipt.TransferAmount,
 			"FeeAmount":            receipt.FeeAmount,
+			"CurrentStep":          receipt.CurrentStep,
 		})
 	}
 }
@@ -258,7 +263,8 @@ func handleListAccounts(store eventstore.Store) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"accounts": []accountDTO{{ID: principal.AccountID, Balance: domain.ReplayAccount(principal.AccountID, events).Balance, EventCount: len(events)}}})
+			a := domain.ReplayAccount(principal.AccountID, events)
+			writeJSON(w, http.StatusOK, map[string]any{"accounts": []accountDTO{{ID: principal.AccountID, Balance: a.Balance, ReservedBalance: a.ReservedBalance, AvailableBalance: a.AvailableBalance, EventCount: len(events)}}})
 			return
 		}
 		accounts, err := listAccounts(store)
@@ -599,9 +605,11 @@ func statusForError(err error) int {
 }
 
 type accountDTO struct {
-	ID         string       `json:"id"`
-	Balance    domain.Money `json:"balance"`
-	EventCount int          `json:"event_count"`
+	ID               string       `json:"id"`
+	Balance          domain.Money `json:"balance"`
+	ReservedBalance  domain.Money `json:"reserved_balance"`
+	AvailableBalance domain.Money `json:"available_balance"`
+	EventCount       int          `json:"event_count"`
 }
 
 func listAccounts(store eventstore.Store) ([]accountDTO, error) {
@@ -615,9 +623,8 @@ func listAccounts(store eventstore.Store) ([]accountDTO, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, accountDTO{
-			ID: id, Balance: domain.ReplayAccount(id, events).Balance, EventCount: len(events),
-		})
+		a := domain.ReplayAccount(id, events)
+		out = append(out, accountDTO{ID: id, Balance: a.Balance, ReservedBalance: a.ReservedBalance, AvailableBalance: a.AvailableBalance, EventCount: len(events)})
 	}
 	return out, nil
 }
@@ -651,6 +658,12 @@ func toEventDTOs(events []domain.Event) []eventDTO {
 			dto.Amount = typedEvent.Amount
 			dto.TransferID, dto.Purpose, dto.CounterpartyAccountID = typedEvent.TransferID, typedEvent.Purpose, typedEvent.CounterpartyAccountID
 			dto.AdjustmentID, dto.AdjustmentReason, dto.CaseReference, dto.OriginalReference = typedEvent.AdjustmentID, typedEvent.AdjustmentReason, typedEvent.CaseReference, typedEvent.OriginalReference
+		case domain.FundsReserved:
+			dto.Amount, dto.TransferID, dto.Purpose = typedEvent.Amount, typedEvent.TransferID, "reservation"
+		case domain.ReservationCaptured:
+			dto.Amount, dto.TransferID, dto.Purpose = typedEvent.Amount, typedEvent.TransferID, "reservation_captured"
+		case domain.ReservationReleased:
+			dto.Amount, dto.TransferID, dto.Purpose = typedEvent.Amount, typedEvent.TransferID, "reservation_released"
 		}
 		out = append(out, dto)
 	}

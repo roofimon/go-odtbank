@@ -42,11 +42,12 @@ func main() {
 		eb.Publish(event)
 	}
 
-	transferStore, ok := store.(domain.AtomicTransferStore)
+	transferStore, ok := store.(domain.TransferSagaStore)
 	if !ok {
 		log.Fatal("configured store does not support atomic transfers")
 	}
 	transferService := service.NewTransferService(transferStore, feePolicy, timeService, eventBusFunc)
+	go transferService.Run(context.Background())
 	depositService := service.NewDepositService(store)
 	withdrawService := service.NewWithdrawService(store)
 	onboardingStore, ok := store.(domain.OnboardingStore)

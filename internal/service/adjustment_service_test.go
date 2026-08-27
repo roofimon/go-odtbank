@@ -69,6 +69,7 @@ func TestAdjustment_TransferReversalRefundsFeeAndCanRunOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	completeSaga(t, transferService, receipt.TransferID)
 
 	svc := service.NewAdjustmentService(store)
 	request, err := svc.Create(domain.AdjustmentRequest{Type: domain.AdjustmentReversal, OriginalTransferID: receipt.TransferID, Reason: "Reverse erroneous transfer", CaseReference: "CASE-3"}, "maker")

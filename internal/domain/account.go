@@ -5,8 +5,10 @@ import "time"
 // Account is a stateless view over its event stream.
 // Balance is derived by folding events; it is never mutated directly.
 type Account struct {
-	ID      string
-	Balance Money
+	ID               string
+	Balance          Money
+	ReservedBalance  Money
+	AvailableBalance Money
 }
 
 // ReplayAccount reconstructs an Account by folding its event history.
@@ -21,8 +23,15 @@ func ReplayAccount(id string, events []Event) *Account {
 			a.Balance += e.Amount
 		case MoneyDebited:
 			a.Balance -= e.Amount
+		case FundsReserved:
+			a.ReservedBalance += e.Amount
+		case ReservationCaptured:
+			a.ReservedBalance -= e.Amount
+		case ReservationReleased:
+			a.ReservedBalance -= e.Amount
 		}
 	}
+	a.AvailableBalance = a.Balance - a.ReservedBalance
 	return a
 }
 
@@ -35,6 +44,7 @@ type TransferReceipt struct {
 	FinalDestinationAccount   *Account
 	TransferAmount            Money
 	FeeAmount                 Money
+	CurrentStep               string
 }
 
 type DepositReceipt struct {

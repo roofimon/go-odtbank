@@ -73,7 +73,7 @@ export function WithdrawForm({ accounts, onCompleted }: Props) {
           >
             {accounts.map((account) => (
               <option key={account.id} value={account.id}>
-                {account.id} ({formatMoney(account.balance)})
+                {account.id} ({formatMoney(account.available_balance)} available)
               </option>
             ))}
           </select>
