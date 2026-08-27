@@ -119,7 +119,7 @@ The backend accepts credentialed browser requests through its CORS middleware. S
 Start PostgreSQL and MinIO, then apply the migrations:
 
 ```bash
-docker compose up -d postgres minio
+docker compose up -d
 docker compose run --rm migrate up
 ```
 
@@ -144,7 +144,9 @@ Equivalent Make targets:
 
 PostgreSQL persists data in the `postgres-data` Docker volume. Use `docker compose down -v` only when you also want to remove that data.
 
-MinIO persists passport objects in the `minio-data` volume. Its API is available at `http://localhost:9000` and its development console at `http://localhost:9001`. The default local credentials are `minioadmin` / `minioadmin`; change them outside local development. The backend creates the private `odtbank-passports` bucket when it starts.
+### MinIO passport storage
+
+MinIO persists passport objects in the `minio-data` volume. Its S3-compatible API is available at `http://localhost:9000` and its development console at `http://localhost:9001`. Sign in to the console with the local credentials `minioadmin` / `minioadmin`. The backend creates the private `odtbank-passports` bucket when it starts; the bucket does not allow anonymous access.
 
 | Environment variable | Default             | Purpose                                  |
 | -------------------- | ------------------- | ---------------------------------------- |
@@ -155,6 +157,27 @@ MinIO persists passport objects in the `minio-data` volume. Its API is available
 | `MINIO_USE_SSL`      | `false`             | Set to `true` for an HTTPS endpoint.     |
 
 When PostgreSQL is enabled, onboarding uploads the validated image to MinIO first and stores only its object key and MIME type in the customer row. If the database write fails, the uploaded object is removed. Existing images from earlier migrations remain readable from the legacy `BYTEA` field. In-memory mode remains self-contained and stores images only for the lifetime of the process.
+
+The object key format is `passports/{customer_id}`. Images are not linked directly from the browser: the protected `GET /admin/applications/{customer_id}/passport` endpoint verifies the admin session, reads the object from MinIO, and streams it with its detected content type.
+
+Verify the local service and storage integration:
+
+```bash
+docker compose ps minio
+MINIO_INTEGRATION=1 go test ./internal/objectstore -run TestMinIOStoreIntegration -count=1 -v
+```
+
+After submitting onboarding, open the MinIO console and inspect the `odtbank-passports` bucket, or retrieve the image through the admin application screen. Do not make this bucket public because passport images contain sensitive identity data.
+
+If the backend reports a MinIO startup error:
+
+- Confirm `docker compose ps minio` reports `healthy`.
+- Confirm port `9000` is available and `MINIO_ENDPOINT` contains only `host:port`, without `http://`.
+- Confirm `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY` match the MinIO server credentials.
+- Use `MINIO_ENDPOINT=minio:9000` when the backend itself runs inside the Compose network.
+- Apply migration `0007_passport_object_storage` before accepting new PostgreSQL onboarding requests.
+
+`docker compose down` stops MinIO without deleting passport objects. `docker compose down -v` permanently deletes both the PostgreSQL and MinIO development volumes.
 
 Create or update a PostgreSQL admin after applying all migrations:
 

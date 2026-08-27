@@ -3,7 +3,7 @@ DSN ?= postgres://postgres:postgres@localhost:5432/odtbank?sslmode=disable
 .PHONY: up down migrate migrate-down run admin test build vet web-dev web-test
 
 up:
-	docker compose up -d postgres minio
+	docker compose up -d
 
 down:
 	docker compose down
