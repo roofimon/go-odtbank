@@ -16,8 +16,16 @@ import (
 	"go-odtbank/internal/eventstore"
 )
 
+// accountReader derives current account state. The httpapi depends only on the
+// read contract so it can use a snapshot-aware repository without the rest of the
+// write-only parts of the domain repository interface.
+type accountReader interface {
+	FindByID(id string) (*domain.Account, error)
+}
+
 type Dependencies struct {
 	Store             eventstore.Store
+	AccountRepository accountReader
 	TransferService   domain.TransferService
 	DepositService    domain.DepositService
 	WithdrawService   domain.WithdrawService
@@ -51,9 +59,9 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.HandleFunc("/transfers/{id}", banking(handleTransferStatus(deps.TransferService))).Methods(http.MethodGet)
 	router.HandleFunc("/deposit", banking(handleDeposit(deps.DepositService))).Methods(http.MethodPost)
 	router.HandleFunc("/withdraw", banking(handleWithdraw(deps.WithdrawService))).Methods(http.MethodPost)
-	router.HandleFunc("/accounts", banking(handleListAccounts(deps.Store))).Methods(http.MethodGet)
+	router.HandleFunc("/accounts", banking(handleListAccounts(deps.Store, deps.AccountRepository))).Methods(http.MethodGet)
 	router.HandleFunc("/accounts/{id}/events", banking(handleAccountEvents(deps.Store))).Methods(http.MethodGet)
-	router.HandleFunc("/admin/accounts/{id}/events", admin(handleAdminAccountEvents(deps.Store))).Methods(http.MethodGet)
+	router.HandleFunc("/admin/accounts/{id}/events", admin(handleAdminAccountEvents(deps.Store, deps.AccountRepository))).Methods(http.MethodGet)
 	if deps.ReviewService != nil {
 		router.HandleFunc("/admin/applications", admin(handleApplications(deps.ReviewService))).Methods(http.MethodGet)
 		router.HandleFunc("/admin/applications/{id}", admin(handleApplication(deps.ReviewService))).Methods(http.MethodGet)
@@ -255,25 +263,37 @@ func handleOnboarding(onboardingService domain.OnboardingService) http.HandlerFu
 	}
 }
 
-func handleListAccounts(store eventstore.Store) http.HandlerFunc {
+func handleListAccounts(store eventstore.Store, repo accountReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if principal := principalFromRequest(r); principal != nil {
 			events, err := store.Load(principal.AccountID)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
-			}
-			a := domain.ReplayAccount(principal.AccountID, events)
+				}
+			a := balanceAccount(repo, principal.AccountID, events)
 			writeJSON(w, http.StatusOK, map[string]any{"accounts": []accountDTO{{ID: principal.AccountID, Balance: a.Balance, ReservedBalance: a.ReservedBalance, AvailableBalance: a.AvailableBalance, EventCount: len(events)}}})
 			return
-		}
-		accounts, err := listAccounts(store)
+			}
+		accounts, err := listAccounts(store, repo)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
 	}
+}
+
+// balanceAccount derives current balances from the repository (snapshot-aware when
+// present), falling back to a full replay of the loaded events otherwise. The
+// caller still owns event_count from the full stream.
+func balanceAccount(repo accountReader, id string, events []domain.Event) *domain.Account {
+	if repo != nil {
+		if a, err := repo.FindByID(id); err == nil {
+			return a
+		}
+	}
+	return domain.ReplayAccount(id, events)
 }
 
 func handleAccountEvents(store eventstore.Store) http.HandlerFunc {
@@ -295,23 +315,23 @@ func handleAccountEvents(store eventstore.Store) http.HandlerFunc {
 	}
 }
 
-func handleAdminAccountEvents(store eventstore.Store) http.HandlerFunc {
+func handleAdminAccountEvents(store eventstore.Store, repo accountReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(mux.Vars(r)["id"])
 		if id == "" {
 			writeError(w, http.StatusBadRequest, "account id is required")
 			return
-		}
+			}
 		events, err := store.Load(id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
-		}
+			}
 		if len(events) == 0 {
 			writeError(w, http.StatusNotFound, domain.ErrAccountNotFound.Error())
 			return
-		}
-		account := domain.ReplayAccount(id, events)
+			}
+		account := balanceAccount(repo, id, events)
 		writeJSON(w, http.StatusOK, map[string]any{"aggregate_id": id, "balance": account.Balance, "event_count": len(events), "events": toEventDTOs(events)})
 	}
 }
@@ -612,7 +632,7 @@ type accountDTO struct {
 	EventCount       int          `json:"event_count"`
 }
 
-func listAccounts(store eventstore.Store) ([]accountDTO, error) {
+func listAccounts(store eventstore.Store, repo accountReader) ([]accountDTO, error) {
 	ids, err := store.ListAggregates()
 	if err != nil {
 		return nil, err
@@ -623,7 +643,7 @@ func listAccounts(store eventstore.Store) ([]accountDTO, error) {
 		if err != nil {
 			return nil, err
 		}
-		a := domain.ReplayAccount(id, events)
+		a := balanceAccount(repo, id, events)
 		out = append(out, accountDTO{ID: id, Balance: a.Balance, ReservedBalance: a.ReservedBalance, AvailableBalance: a.AvailableBalance, EventCount: len(events)})
 	}
 	return out, nil

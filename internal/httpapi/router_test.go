@@ -227,13 +227,13 @@ func TestHandleAdminAccountEventsReturnsHistoryAndNotFound(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	request := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/admin/accounts/acc1/events", nil), map[string]string{"id": "acc1"})
-	handleAdminAccountEvents(store).ServeHTTP(response, request)
+	handleAdminAccountEvents(store, nil).ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"balance":100.00`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	missing := httptest.NewRecorder()
 	missingRequest := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/admin/accounts/missing/events", nil), map[string]string{"id": "missing"})
-	handleAdminAccountEvents(store).ServeHTTP(missing, missingRequest)
+	handleAdminAccountEvents(store, nil).ServeHTTP(missing, missingRequest)
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing status=%d", missing.Code)
 	}
