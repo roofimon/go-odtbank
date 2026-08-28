@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"go-odtbank/internal/httpapi"
 	"go-odtbank/internal/objectstore"
 	"go-odtbank/internal/policy"
+	"go-odtbank/internal/repository"
 	"go-odtbank/internal/service"
 )
 
@@ -87,8 +89,10 @@ func main() {
 	}
 
 	// 3. Setup HTTP transport
+	accountRepo := repository.NewMemoryAccountRepository(store, envIntOrDefault("SNAPSHOT_THRESHOLD", 50))
 	handler := httpapi.NewRouter(httpapi.Dependencies{
 		Store:             store,
+		AccountRepository: accountRepo,
 		TransferService:   transferService,
 		DepositService:    depositService,
 		WithdrawService:   withdrawService,
@@ -151,6 +155,18 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envIntOrDefault(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func closeStore(store eventstore.Store) {
