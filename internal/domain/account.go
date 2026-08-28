@@ -11,28 +11,64 @@ type Account struct {
 	AvailableBalance Money
 }
 
-// ReplayAccount reconstructs an Account by folding its event history.
-// The returned Account reflects the cumulative effect of all events seen.
+// AccountSnapshot is a materialized view of an account's state at a point in
+// time. AsOfSequence is the stream sequence the snapshot already includes, so the
+// current state is snapshot + events with Version() > AsOfSequence.
+type AccountSnapshot struct {
+	AggregateID      string
+	Balance          Money
+	ReservedBalance  Money
+	AvailableBalance Money
+	AsOfSequence     int
+	OccurredAt       time.Time
+}
+
+// ReplayAccount reconstructs an Account by folding its entire event history.
 func ReplayAccount(id string, events []Event) *Account {
+	return ReplayAccountFrom(id, nil, events)
+}
+
+// ReplayAccountFrom reconstructs an Account starting from an optional snapshot.
+// When snap is non-nil, only events with Version() > snap.AsOfSequence are
+// folded, so a long stream is read as the snapshot plus its tail. When snap is
+// nil, this behaves like ReplayAccount.
+func ReplayAccountFrom(id string, snap *AccountSnapshot, events []Event) *Account {
+	if snap != nil && snap.AggregateID == id {
+		a := &Account{ID: id, Balance: snap.Balance, ReservedBalance: snap.ReservedBalance}
+		cutoff := snap.AsOfSequence
+		for _, ev := range events {
+			if ev.Version() <= cutoff {
+				continue
+			}
+			fold(a, ev)
+		}
+		a.AvailableBalance = a.Balance - a.ReservedBalance
+		return a
+	}
+
 	a := &Account{ID: id}
 	for _, ev := range events {
-		switch e := ev.(type) {
-		case AccountOpened:
-			a.Balance = e.InitialBalance
-		case MoneyCredited:
-			a.Balance += e.Amount
-		case MoneyDebited:
-			a.Balance -= e.Amount
-		case FundsReserved:
-			a.ReservedBalance += e.Amount
-		case ReservationCaptured:
-			a.ReservedBalance -= e.Amount
-		case ReservationReleased:
-			a.ReservedBalance -= e.Amount
-		}
+		fold(a, ev)
 	}
 	a.AvailableBalance = a.Balance - a.ReservedBalance
 	return a
+}
+
+func fold(a *Account, ev Event) {
+	switch e := ev.(type) {
+	case AccountOpened:
+		a.Balance = e.InitialBalance
+	case MoneyCredited:
+		a.Balance += e.Amount
+	case MoneyDebited:
+		a.Balance -= e.Amount
+	case FundsReserved:
+		a.ReservedBalance += e.Amount
+	case ReservationCaptured:
+		a.ReservedBalance -= e.Amount
+	case ReservationReleased:
+		a.ReservedBalance -= e.Amount
+	}
 }
 
 type TransferReceipt struct {

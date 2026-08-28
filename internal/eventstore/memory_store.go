@@ -15,6 +15,7 @@ import (
 type MemoryStore struct {
 	mu                  sync.RWMutex
 	streams             map[string][]domain.Event
+	snapshots           map[string]domain.AccountSnapshot
 	customers           map[string]domain.Customer
 	admins              map[string]domain.Admin
 	sessions            map[string]domain.Session
@@ -34,6 +35,7 @@ type memoryReservation struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		streams:             make(map[string][]domain.Event),
+		snapshots:           make(map[string]domain.AccountSnapshot),
 		customers:           make(map[string]domain.Customer),
 		admins:              make(map[string]domain.Admin),
 		sessions:            make(map[string]domain.Session),
@@ -609,3 +611,31 @@ func (m *MemoryStore) ListAggregates() ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
+
+// SaveSnapshot stores the latest account snapshot for an aggregate, ignoring any
+// snapshot whose AsOfSequence is not newer than the one already stored.
+func (m *MemoryStore) SaveSnapshot(snap domain.AccountSnapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, ok := m.snapshots[snap.AggregateID]; ok && existing.AsOfSequence >= snap.AsOfSequence {
+		return nil
+	}
+	m.snapshots[snap.AggregateID] = snap
+	return nil
+}
+
+// LoadSnapshot returns a copy of the latest account snapshot, or nil and
+// ErrNoSnapshot when none exists.
+func (m *MemoryStore) LoadSnapshot(aggregateID string) (*domain.AccountSnapshot, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	snap, ok := m.snapshots[aggregateID]
+	if !ok {
+		return nil, ErrNoSnapshot
+	}
+	return &snap, nil
+}
+
+var _ Store = (*MemoryStore)(nil)

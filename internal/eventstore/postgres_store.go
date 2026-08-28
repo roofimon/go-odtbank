@@ -995,6 +995,56 @@ func (s *PostgresStore) Load(aggregateID string) ([]domain.Event, error) {
 	return out, nil
 }
 
+// SaveSnapshot upserts the latest account snapshot for an aggregate. A snapshot
+// whose AsOfSequence is not newer than the stored one is ignored, so a slow
+// writer can't overwrite a newer snapshot.
+func (s *PostgresStore) SaveSnapshot(snap domain.AccountSnapshot) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO account_snapshots
+			(aggregate_id, balance_minor, reserved_balance_minor, available_balance_minor, as_of_sequence, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (aggregate_id) DO UPDATE
+		SET balance_minor=EXCLUDED.balance_minor,
+		    reserved_balance_minor=EXCLUDED.reserved_balance_minor,
+		    available_balance_minor=EXCLUDED.available_balance_minor,
+		    as_of_sequence=EXCLUDED.as_of_sequence,
+		    occurred_at=EXCLUDED.occurred_at
+		WHERE account_snapshots.as_of_sequence < EXCLUDED.as_of_sequence
+	`, snap.AggregateID, int64(snap.Balance), int64(snap.ReservedBalance), int64(snap.AvailableBalance), int64(snap.AsOfSequence), snap.OccurredAt)
+	if err != nil {
+		return fmt.Errorf("eventstore: save snapshot: %w", err)
+	}
+	return nil
+}
+
+// LoadSnapshot returns the latest account snapshot, or nil and ErrNoSnapshot.
+func (s *PostgresStore) LoadSnapshot(aggregateID string) (*domain.AccountSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var snap domain.AccountSnapshot
+	var balance, reserved, available int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT balance_minor, reserved_balance_minor, available_balance_minor, as_of_sequence, occurred_at
+		FROM account_snapshots
+		WHERE aggregate_id = $1
+	`, aggregateID).Scan(&balance, &reserved, &available, &snap.AsOfSequence, &snap.OccurredAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNoSnapshot
+	}
+	if err != nil {
+		return nil, fmt.Errorf("eventstore: load snapshot: %w", err)
+	}
+	snap.AggregateID = aggregateID
+	snap.Balance = domain.Money(balance)
+	snap.ReservedBalance = domain.Money(reserved)
+	snap.AvailableBalance = domain.Money(available)
+	return &snap, nil
+}
+
 // ListAggregates returns distinct aggregate IDs, sorted ascending.
 func (s *PostgresStore) ListAggregates() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
