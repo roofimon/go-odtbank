@@ -13,23 +13,37 @@ import (
 // It is the prototype implementation of Store; the Postgres implementation
 // will satisfy the same interface.
 type MemoryStore struct {
-	mu          sync.RWMutex
-	streams     map[string][]domain.Event
-	customers   map[string]domain.Customer
-	admins      map[string]domain.Admin
-	sessions    map[string]domain.Session
-	transfers   map[string]domain.TransferRecord
-	adjustments map[string]domain.AdjustmentRequest
+	mu                  sync.RWMutex
+	streams             map[string][]domain.Event
+	snapshots           map[string]domain.AccountSnapshot
+	customers           map[string]domain.Customer
+	admins              map[string]domain.Admin
+	sessions            map[string]domain.Session
+	transfers           map[string]domain.TransferRecord
+	adjustments         map[string]domain.AdjustmentRequest
+	reservations        map[string]memoryReservation
+	ledgerPostings      map[string]bool
+	complianceDecisions map[string]string
+}
+
+type memoryReservation struct {
+	AccountID string
+	Amount    domain.Money
+	State     string
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		streams:     make(map[string][]domain.Event),
-		customers:   make(map[string]domain.Customer),
-		admins:      make(map[string]domain.Admin),
-		sessions:    make(map[string]domain.Session),
-		transfers:   make(map[string]domain.TransferRecord),
-		adjustments: make(map[string]domain.AdjustmentRequest),
+		streams:             make(map[string][]domain.Event),
+		snapshots:           make(map[string]domain.AccountSnapshot),
+		customers:           make(map[string]domain.Customer),
+		admins:              make(map[string]domain.Admin),
+		sessions:            make(map[string]domain.Session),
+		transfers:           make(map[string]domain.TransferRecord),
+		adjustments:         make(map[string]domain.AdjustmentRequest),
+		reservations:        make(map[string]memoryReservation),
+		ledgerPostings:      make(map[string]bool),
+		complianceDecisions: make(map[string]string),
 	}
 }
 
@@ -130,7 +144,7 @@ func (m *MemoryStore) DeleteSession(tokenHash string) error {
 var _ domain.OnboardingStore = (*MemoryStore)(nil)
 var _ domain.AuthStore = (*MemoryStore)(nil)
 var _ domain.ReviewStore = (*MemoryStore)(nil)
-var _ domain.AtomicTransferStore = (*MemoryStore)(nil)
+var _ domain.TransferSagaStore = (*MemoryStore)(nil)
 var _ domain.AdjustmentStore = (*MemoryStore)(nil)
 
 func (m *MemoryStore) CreateAdjustment(r domain.AdjustmentRequest) (*domain.AdjustmentRequest, error) {
@@ -232,7 +246,7 @@ func (m *MemoryStore) ApproveAdjustment(id, adminID string, at time.Time) error 
 	}
 	appendDebit := func(account string, amount domain.Money, counterparty string) error {
 		events := m.streams[account]
-		if domain.ReplayAccount(account, events).Balance < amount {
+		if domain.ReplayAccount(account, events).AvailableBalance < amount {
 			return domain.NewInsufficientFundsError(domain.ReplayAccount(account, events), amount)
 		}
 		m.streams[account] = append(events, domain.MoneyDebited{Aggregate: account, Type: "MoneyDebited", Seq: len(events), Occurred: at, ID: account, Amount: amount, Purpose: map[bool]string{true: "reversal", false: "adjustment"}[r.Type == domain.AdjustmentReversal], CounterpartyAccountID: counterparty, AdjustmentID: r.ID, AdjustmentReason: r.Reason, CaseReference: r.CaseReference, OriginalReference: ref})
@@ -277,6 +291,162 @@ func (m *MemoryStore) RejectAdjustment(id, adminID, reason string, at time.Time)
 	return nil
 }
 
+func (m *MemoryStore) CreateTransfer(record domain.TransferRecord) (*domain.TransferRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, existing := range m.transfers {
+		if existing.SourceAccountID == record.SourceAccountID && existing.IdempotencyKey == record.IdempotencyKey {
+			if existing.Amount != record.Amount || existing.DestinationAccountID != record.DestinationAccountID {
+				return nil, false, domain.ErrIdempotencyConflict
+			}
+			copy := existing
+			return &copy, false, nil
+		}
+	}
+	m.transfers[record.ID] = record
+	copy := record
+	return &copy, true, nil
+}
+func (m *MemoryStore) ListDueTransfers(now time.Time, limit int) ([]domain.TransferRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := []domain.TransferRecord{}
+	for _, r := range m.transfers {
+		if r.Status == domain.TransferPending && !r.NextAttemptAt.After(now) {
+			out = append(out, r)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+func (m *MemoryStore) UpdateTransferSaga(id string, u domain.TransferSagaUpdate, at time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.transfers[id]
+	if !ok {
+		return false, domain.ErrTransferNotFound
+	}
+	if r.Status != domain.TransferPending || r.CurrentStep != u.ExpectedStep {
+		return false, nil
+	}
+	r.CurrentStep = u.CurrentStep
+	r.Status = u.Status
+	r.FailureCode = u.FailureCode
+	if u.ComplianceStatus != "" {
+		r.ComplianceStatus = u.ComplianceStatus
+	}
+	r.LastError = u.LastError
+	r.AttemptCount = u.AttemptCount
+	r.NextAttemptAt = u.NextAttemptAt
+	r.UpdatedAt = at
+	if u.InitialSourceBalance != 0 {
+		r.InitialSourceBalance = u.InitialSourceBalance
+	}
+	if u.FinalSourceBalance != 0 {
+		r.FinalSourceBalance = u.FinalSourceBalance
+	}
+	m.transfers[id] = r
+	return true, nil
+}
+func (m *MemoryStore) ReserveTransferFunds(r domain.TransferRecord, at time.Time) (domain.Money, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.reservations[r.ID]; ok {
+		return domain.ReplayAccount(r.SourceAccountID, m.streams[r.SourceAccountID]).Balance, nil
+	}
+	src, dst := m.streams[r.SourceAccountID], m.streams[r.DestinationAccountID]
+	if len(src) == 0 || len(dst) == 0 {
+		return 0, domain.ErrAccountNotFound
+	}
+	a := domain.ReplayAccount(r.SourceAccountID, src)
+	amount := r.Amount + r.Fee
+	if a.AvailableBalance < amount {
+		return 0, domain.NewInsufficientFundsError(a, amount)
+	}
+	m.reservations[r.ID] = memoryReservation{AccountID: r.SourceAccountID, Amount: amount, State: "reserved"}
+	m.streams[r.SourceAccountID] = append(src, domain.FundsReserved{Aggregate: r.SourceAccountID, Type: "FundsReserved", Seq: len(src), Occurred: at, ID: r.SourceAccountID, Amount: amount, TransferID: r.ID})
+	return a.Balance, nil
+}
+func (m *MemoryStore) RecordComplianceDecision(id, decision string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if old, ok := m.complianceDecisions[id]; ok && old != decision {
+		return domain.ErrIdempotencyConflict
+	}
+	m.complianceDecisions[id] = decision
+	return nil
+}
+func (m *MemoryStore) PostTransferLedger(r domain.TransferRecord, at time.Time) (domain.Money, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ledgerPostings[r.ID] {
+		return domain.ReplayAccount(r.SourceAccountID, m.streams[r.SourceAccountID]).Balance, nil
+	}
+	src, dst := m.streams[r.SourceAccountID], m.streams[r.DestinationAccountID]
+	if len(src) == 0 || len(dst) == 0 {
+		return 0, domain.ErrAccountNotFound
+	}
+	if r.Fee > 0 {
+		src = append(src, domain.MoneyDebited{Aggregate: r.SourceAccountID, Type: "MoneyDebited", Seq: len(src), Occurred: at, ID: r.SourceAccountID, Amount: r.Fee, TransferID: r.ID, Purpose: "fee", CounterpartyAccountID: r.DestinationAccountID})
+	}
+	src = append(src, domain.MoneyDebited{Aggregate: r.SourceAccountID, Type: "MoneyDebited", Seq: len(src), Occurred: at, ID: r.SourceAccountID, Amount: r.Amount, TransferID: r.ID, Purpose: "transfer", CounterpartyAccountID: r.DestinationAccountID})
+	dst = append(dst, domain.MoneyCredited{Aggregate: r.DestinationAccountID, Type: "MoneyCredited", Seq: len(dst), Occurred: at, ID: r.DestinationAccountID, Amount: r.Amount, TransferID: r.ID, Purpose: "transfer", CounterpartyAccountID: r.SourceAccountID})
+	m.streams[r.SourceAccountID] = src
+	m.streams[r.DestinationAccountID] = dst
+	m.ledgerPostings[r.ID] = true
+	return domain.ReplayAccount(r.SourceAccountID, src).Balance, nil
+}
+func (m *MemoryStore) CaptureTransferReservation(r domain.TransferRecord, at time.Time) error {
+	return m.finishReservation(r, at, "captured")
+}
+func (m *MemoryStore) ReleaseTransferReservation(r domain.TransferRecord, at time.Time) error {
+	return m.finishReservation(r, at, "released")
+}
+func (m *MemoryStore) finishReservation(r domain.TransferRecord, at time.Time, state string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hold, ok := m.reservations[r.ID]
+	if !ok {
+		return nil
+	}
+	if hold.State == state {
+		return nil
+	}
+	if hold.State != "reserved" {
+		return domain.ErrIdempotencyConflict
+	}
+	events := m.streams[hold.AccountID]
+	if state == "captured" {
+		events = append(events, domain.ReservationCaptured{Aggregate: hold.AccountID, Type: "ReservationCaptured", Seq: len(events), Occurred: at, ID: hold.AccountID, Amount: hold.Amount, TransferID: r.ID})
+	} else {
+		events = append(events, domain.ReservationReleased{Aggregate: hold.AccountID, Type: "ReservationReleased", Seq: len(events), Occurred: at, ID: hold.AccountID, Amount: hold.Amount, TransferID: r.ID})
+	}
+	hold.State = state
+	m.reservations[r.ID] = hold
+	m.streams[hold.AccountID] = events
+	return nil
+}
+
+func (m *MemoryStore) WithdrawAvailable(accountID string, amount domain.Money, at time.Time) (*domain.Account, *domain.Account, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	events := m.streams[accountID]
+	if len(events) == 0 {
+		return nil, nil, domain.ErrAccountNotFound
+	}
+	initial := domain.ReplayAccount(accountID, events)
+	if initial.AvailableBalance < amount {
+		return nil, nil, domain.NewInsufficientFundsError(initial, amount)
+	}
+	ev := domain.MoneyDebited{Aggregate: accountID, Type: "MoneyDebited", Seq: len(events), Occurred: at, ID: accountID, Amount: amount}
+	m.streams[accountID] = append(events, ev)
+	return initial, domain.ReplayAccount(accountID, append(events, ev)), nil
+}
+
+// ExecuteTransfer is retained for compatibility with older callers. New transfers use the saga methods above.
 func (m *MemoryStore) ExecuteTransfer(record domain.TransferRecord) (*domain.TransferRecord, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -441,3 +611,31 @@ func (m *MemoryStore) ListAggregates() ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
+
+// SaveSnapshot stores the latest account snapshot for an aggregate, ignoring any
+// snapshot whose AsOfSequence is not newer than the one already stored.
+func (m *MemoryStore) SaveSnapshot(snap domain.AccountSnapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, ok := m.snapshots[snap.AggregateID]; ok && existing.AsOfSequence >= snap.AsOfSequence {
+		return nil
+	}
+	m.snapshots[snap.AggregateID] = snap
+	return nil
+}
+
+// LoadSnapshot returns a copy of the latest account snapshot, or nil and
+// ErrNoSnapshot when none exists.
+func (m *MemoryStore) LoadSnapshot(aggregateID string) (*domain.AccountSnapshot, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	snap, ok := m.snapshots[aggregateID]
+	if !ok {
+		return nil, ErrNoSnapshot
+	}
+	return &snap, nil
+}
+
+var _ Store = (*MemoryStore)(nil)

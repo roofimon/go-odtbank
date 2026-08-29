@@ -69,3 +69,48 @@ func (e MoneyCredited) AggregateID() string   { return e.Aggregate }
 func (e MoneyCredited) EventType() string     { return e.Type }
 func (e MoneyCredited) Version() int          { return e.Seq }
 func (e MoneyCredited) OccurredAt() time.Time { return e.Occurred }
+
+type FundsReserved struct {
+	Aggregate  string
+	Type       string
+	Seq        int
+	Occurred   time.Time
+	ID         string
+	Amount     Money
+	TransferID string `json:"transfer_id"`
+}
+
+func (e FundsReserved) AggregateID() string   { return e.Aggregate }
+func (e FundsReserved) EventType() string     { return e.Type }
+func (e FundsReserved) Version() int          { return e.Seq }
+func (e FundsReserved) OccurredAt() time.Time { return e.Occurred }
+
+type ReservationCaptured struct {
+	Aggregate  string
+	Type       string
+	Seq        int
+	Occurred   time.Time
+	ID         string
+	Amount     Money
+	TransferID string `json:"transfer_id"`
+}
+
+func (e ReservationCaptured) AggregateID() string   { return e.Aggregate }
+func (e ReservationCaptured) EventType() string     { return e.Type }
+func (e ReservationCaptured) Version() int          { return e.Seq }
+func (e ReservationCaptured) OccurredAt() time.Time { return e.Occurred }
+
+type ReservationReleased struct {
+	Aggregate  string
+	Type       string
+	Seq        int
+	Occurred   time.Time
+	ID         string
+	Amount     Money
+	TransferID string `json:"transfer_id"`
+}
+
+func (e ReservationReleased) AggregateID() string   { return e.Aggregate }
+func (e ReservationReleased) EventType() string     { return e.Type }
+func (e ReservationReleased) Version() int          { return e.Seq }
+func (e ReservationReleased) OccurredAt() time.Time { return e.Occurred }

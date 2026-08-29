@@ -15,6 +15,35 @@ import (
 type capturedEvent struct {
 	got domain.TransferCompletedEvent
 }
+type complianceResult struct {
+	approved bool
+	err      error
+}
+
+func (c complianceResult) CheckTransfer(domain.TransferRecord) (bool, error) {
+	return c.approved, c.err
+}
+
+func completeSaga(t *testing.T, svc *service.TransferService, id string) *domain.TransferRecord {
+	t.Helper()
+	for range 5 {
+		r, err := svc.Find(id, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Status != domain.TransferPending {
+			return r
+		}
+		if err = svc.Process(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := svc.Find(id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
 
 func TestTransfer_IdempotentRetryAndConflict(t *testing.T) {
 	store := eventstore.NewMemoryStore()
@@ -35,6 +64,10 @@ func TestTransfer_IdempotentRetryAndConflict(t *testing.T) {
 	if err != nil || second.TransferID != first.TransferID {
 		t.Fatalf("retry=%+v err=%v", second, err)
 	}
+	completed := completeSaga(t, svc, first.TransferID)
+	if completed.Status != domain.TransferCompleted {
+		t.Fatalf("status=%s", completed.Status)
+	}
 	if published != 1 {
 		t.Fatalf("published=%d", published)
 	}
@@ -43,7 +76,7 @@ func TestTransfer_IdempotentRetryAndConflict(t *testing.T) {
 		t.Fatalf("conflict=%v", err)
 	}
 	events, _ := store.Load("a")
-	if len(events) != 2 {
+	if len(events) != 4 {
 		t.Fatalf("source events=%d", len(events))
 	}
 }
@@ -78,30 +111,10 @@ func TestTransfer_ConcurrentDuplicateExecutesOnce(t *testing.T) {
 			t.Errorf("ids differ %s %s", first, id)
 		}
 	}
+	completeSaga(t, svc, first)
 	events, _ := store.Load("a")
-	if len(events) != 2 {
+	if len(events) != 4 {
 		t.Fatalf("source events=%d", len(events))
-	}
-}
-
-type failingAtomicStore struct{ base *eventstore.MemoryStore }
-
-func (f failingAtomicStore) ExecuteTransfer(domain.TransferRecord) (*domain.TransferRecord, bool, error) {
-	return nil, false, errors.New("simulated credit failure")
-}
-func (f failingAtomicStore) FindTransfer(string) (*domain.TransferRecord, error) {
-	return nil, domain.ErrTransferNotFound
-}
-func TestTransfer_CreditFailureChangesNeitherStream(t *testing.T) {
-	base := eventstore.NewMemoryStore()
-	_ = base.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
-	_ = base.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
-	svc := service.NewTransferService(failingAtomicStore{base}, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
-	_, _ = svc.Transfer(domain.TransferCommand{Amount: 1000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "failure"})
-	a, _ := base.Load("a")
-	b, _ := base.Load("b")
-	if len(a) != 1 || len(b) != 1 {
-		t.Fatalf("events changed: %d %d", len(a), len(b))
 	}
 }
 
@@ -135,10 +148,11 @@ func TestTransfer_AppendsEventsAndReplaysState(t *testing.T) {
 		t.Fatalf("Transfer: %v", err)
 	}
 
-	if got, want := receipt.InitialSourceAccount.Balance, domain.Money(10000); got != want {
+	record := completeSaga(t, svc, receipt.TransferID)
+	if got, want := record.InitialSourceBalance, domain.Money(10000); got != want {
 		t.Errorf("initial source balance = %v, want %v", got, want)
 	}
-	if got, want := receipt.FinalSourceAccount.Balance, domain.Money(7500); got != want {
+	if got, want := record.FinalSourceBalance, domain.Money(7500); got != want {
 		t.Errorf("final source balance = %v, want %v", got, want)
 	}
 
@@ -162,5 +176,129 @@ func TestTransfer_AppendsEventsAndReplaysState(t *testing.T) {
 
 	if captured.got.Amount != 2500 || captured.got.SourceAccountID != "acc1" || captured.got.DestinationAccountID != "acc2" {
 		t.Errorf("captured event mismatch: %+v", captured.got)
+	}
+}
+
+func TestTransferSaga_ComplianceRejectionReleasesReservation(t *testing.T) {
+	store := eventstore.NewMemoryStore()
+	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
+	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	svc.SetComplianceChecker(complianceResult{approved: false})
+	receipt, err := svc.Transfer(domain.TransferCommand{Amount: 5000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "reject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := svc.Find(receipt.TransferID, "")
+	if err = svc.Process(r); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := store.Load("a")
+	if got := domain.ReplayAccount("a", events).AvailableBalance; got != 5000 {
+		t.Fatalf("available while reserved=%d", got)
+	}
+	r, _ = svc.Find(receipt.TransferID, "")
+	if err = svc.Process(r); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = svc.Find(receipt.TransferID, "")
+	if r.Status != domain.TransferFailed || r.FailureCode != "compliance_rejected" {
+		t.Fatalf("transfer=%+v", r)
+	}
+	events, _ = store.Load("a")
+	a := domain.ReplayAccount("a", events)
+	if a.Balance != 10000 || a.ReservedBalance != 0 || a.AvailableBalance != 10000 {
+		t.Fatalf("account=%+v", a)
+	}
+}
+
+func TestTransferSaga_ConcurrentReservationsCannotOverspend(t *testing.T) {
+	store := eventstore.NewMemoryStore()
+	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
+	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	one, _ := svc.Transfer(domain.TransferCommand{Amount: 8000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "one"})
+	two, _ := svc.Transfer(domain.TransferCommand{Amount: 8000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "two"})
+	r1, _ := svc.Find(one.TransferID, "")
+	r2, _ := svc.Find(two.TransferID, "")
+	if err := svc.Process(r1); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Process(r2); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ = svc.Find(two.TransferID, "")
+	if r2.Status != domain.TransferFailed || r2.FailureCode != "insufficient_funds" {
+		t.Fatalf("second=%+v", r2)
+	}
+	events, _ := store.Load("a")
+	a := domain.ReplayAccount("a", events)
+	if a.ReservedBalance != 8000 || a.AvailableBalance != 2000 {
+		t.Fatalf("account=%+v", a)
+	}
+}
+
+func TestTransferSaga_SideEffectsAreIdempotent(t *testing.T) {
+	store := eventstore.NewMemoryStore()
+	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
+	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
+	r := domain.TransferRecord{ID: "trf_test", SourceAccountID: "a", DestinationAccountID: "b", Amount: 2000, Fee: 100}
+	if _, err := store.ReserveTransferFunds(r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveTransferFunds(r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PostTransferLedger(r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PostTransferLedger(r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CaptureTransferReservation(r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CaptureTransferReservation(r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	aEvents, _ := store.Load("a")
+	bEvents, _ := store.Load("b")
+	if len(aEvents) != 5 || len(bEvents) != 2 {
+		t.Fatalf("event counts=%d,%d", len(aEvents), len(bEvents))
+	}
+	a := domain.ReplayAccount("a", aEvents)
+	if a.Balance != 7900 || a.ReservedBalance != 0 {
+		t.Fatalf("account=%+v", a)
+	}
+}
+
+func TestTransferSaga_ExhaustedComplianceRetriesReleaseFunds(t *testing.T) {
+	store := eventstore.NewMemoryStore()
+	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
+	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	svc.SetComplianceChecker(complianceResult{err: errors.New("compliance unavailable")})
+	receipt, _ := svc.Transfer(domain.TransferCommand{Amount: 3000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "retry"})
+	r, _ := svc.Find(receipt.TransferID, "")
+	if err := svc.Process(r); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		r, _ = svc.Find(receipt.TransferID, "")
+		if r.Status != domain.TransferPending {
+			break
+		}
+		if err := svc.Process(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, _ = svc.Find(receipt.TransferID, "")
+	if r.Status != domain.TransferFailed || r.FailureCode != "retry_exhausted" || r.AttemptCount != 5 {
+		t.Fatalf("transfer=%+v", r)
+	}
+	events, _ := store.Load("a")
+	a := domain.ReplayAccount("a", events)
+	if a.ReservedBalance != 0 || a.AvailableBalance != 10000 {
+		t.Fatalf("account=%+v", a)
 	}
 }

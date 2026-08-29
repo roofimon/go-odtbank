@@ -2,12 +2,13 @@
 
 import { FormEvent, useRef, useState } from "react";
 import type { Account, TransferReceipt } from "../lib/types";
-import { transfer } from "../lib/api";
+import { getTransferStatus, transfer } from "../lib/api";
 import { formatMoney } from "../lib/format";
 
 type Status =
   | { kind: "idle" }
   | { kind: "loading" }
+  | { kind: "pending"; receipt: TransferReceipt }
   | { kind: "error"; message: string }
   | { kind: "success"; receipt: TransferReceipt };
 
@@ -39,6 +40,12 @@ export function TransferForm({ accounts, onCompleted }: Props) {
     try {
       if (!idempotencyKey.current) idempotencyKey.current = crypto.randomUUID();
       const receipt = await transfer(amt, sourceId, destId, idempotencyKey.current);
+      setStatus({ kind: "pending", receipt });
+      let final = await getTransferStatus(receipt.TransferID);
+      for (let attempt=0; final.status==="pending"&&attempt<120; attempt++) { await new Promise(resolve=>setTimeout(resolve,500)); final=await getTransferStatus(receipt.TransferID); }
+      if(final.status==="failed") throw new Error(final.failure_code?.replaceAll("_"," ")??"Transfer failed");
+      if(final.status!=="completed") throw new Error("Transfer is still processing. Check transaction history shortly.");
+      receipt.Status="completed";receipt.CurrentStep=final.current_step;receipt.InitialSourceAccount.Balance=final.initial_source_balance;receipt.FinalSourceAccount.Balance=final.final_source_balance;
       setStatus({ kind: "success", receipt });
       onCompleted();
     } catch (err) {
@@ -96,13 +103,13 @@ export function TransferForm({ accounts, onCompleted }: Props) {
         <button
           type="submit"
           disabled={
-            status.kind === "loading" ||
+            status.kind === "loading" || status.kind === "pending" ||
             accounts.length < 1 ||
             sourceId === destId
           }
           className="rounded-lg bg-brand px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {status.kind === "loading" ? "Transferring…" : "Transfer"}
+          {status.kind === "loading" ? "Creating…" : status.kind === "pending" ? "Processing…" : "Transfer"}
         </button>
         {sourceId === destId && (
           <span className="text-xs font-medium text-warning">
@@ -116,6 +123,8 @@ export function TransferForm({ accounts, onCompleted }: Props) {
           {status.message}
         </p>
       )}
+
+      {status.kind === "pending" && <p className="mt-4 rounded-lg bg-brand-soft px-3 py-2 text-sm text-brand">Transfer {status.receipt.TransferID} is processing: {status.receipt.CurrentStep.replaceAll("_"," ")}.</p>}
 
       {r && (
         <div className="mt-4 grid grid-cols-2 gap-4 rounded-lg bg-surface-2 p-4 text-sm sm:grid-cols-4">

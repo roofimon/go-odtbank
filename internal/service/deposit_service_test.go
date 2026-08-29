@@ -75,6 +75,10 @@ func TestDeposit_AccountNotFound(t *testing.T) {
 
 type conflictingStore struct{ *eventstore.MemoryStore }
 
+func (conflictingStore) WithdrawAvailable(string, domain.Money, time.Time) (*domain.Account, *domain.Account, error) {
+	return nil, nil, eventstore.ErrConcurrencyConflict
+}
+
 func (s conflictingStore) Append(domain.Event, int) error {
 	return eventstore.ErrConcurrencyConflict
 }

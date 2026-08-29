@@ -28,7 +28,7 @@ Next.js dashboard
 internal/httpapi
   router · handlers · DTOs · CORS · status mapping
         │
-        ├── TransferService ── FeePolicy · TimeService · EventBus
+        ├── TransferService ── Saga worker · Compliance · FeePolicy · EventBus
         ├── DepositService
         ├── WithdrawService
         └── AdjustmentService
@@ -362,16 +362,21 @@ curl -s http://localhost:8080/transfer \
 ```json
 {
   "TransferID": "trf_...",
-  "Status": "completed",
-  "InitialSourceAccount": {"ID":"acc1","Balance":100},
-  "FinalSourceAccount": {"ID":"acc1","Balance":90},
+  "Status": "pending",
+  "InitialSourceAccount": {"ID":"acc1","Balance":0},
+  "FinalSourceAccount": {"ID":"acc1","Balance":0},
   "DestinationAccountID": "acc2",
   "TransferAmount": 10,
-  "FeeAmount": 0
+  "FeeAmount": 0,
+  "CurrentStep": "created"
 }
 ```
 
-`Idempotency-Key` is required and scoped to the source account. Retrying the same transfer with the same key returns the original receipt without appending more events. Reusing it with different details returns `409`. `GET /transfers/{transfer_id}` returns the initiating customer's durable `pending`, `completed`, or `failed` status.
+Successful creation returns `202 Accepted` with status `pending`. A durable background saga then reserves the amount plus fee, records a compliance decision, posts the source debit/fee and destination credit atomically, captures the reservation, and marks the transfer `completed`. The dashboard polls `GET /transfers/{transfer_id}` until the transfer becomes `completed` or `failed`.
+
+`Idempotency-Key` is required and scoped to the source account. Retrying the same transfer with the same key returns the original transfer without creating another reservation or ledger posting. Reusing it with different details returns `409`. Transfer status includes `current_step`, which progresses through `created`, `funds_reserved`, `compliance_approved`, `ledger_posted`, and `reservation_captured`.
+
+Account responses expose `balance` (posted funds), `reserved_balance` (active transfer holds), and `available_balance` (funds that may still be spent). Compliance rejection, missing accounts, insufficient funds, or exhausted pre-ledger retries release the hold and fail the transfer. Once ledger posting succeeds, reservation capture is retried until it completes rather than reversing posted money.
 
 The default wiring uses `ZeroFeePolicy`; flat fees use integer cents and percentage fees use integer basis points with half-up cent rounding.
 
@@ -422,8 +427,8 @@ A withdrawal may reduce the balance to exactly zero but cannot exceed the availa
 ```json
 {
   "accounts": [
-    {"id":"acc1","balance":90,"event_count":2},
-    {"id":"acc2","balance":60,"event_count":2}
+    {"id":"acc1","balance":90,"reserved_balance":0,"available_balance":90,"event_count":4},
+    {"id":"acc2","balance":60,"reserved_balance":0,"available_balance":60,"event_count":2}
   ]
 }
 ```
@@ -460,6 +465,9 @@ A withdrawal may reduce the balance to exactly zero but cannot exceed the availa
 | `AccountOpened` | Sets the initial balance.                                     |
 | `MoneyCredited` | Adds a deposit or destination-side transfer credit.           |
 | `MoneyDebited`  | Subtracts a withdrawal, fee, or source-side transfer debit.   |
+| `FundsReserved` | Places a hold without changing the posted balance.            |
+| `ReservationCaptured` | Closes a hold after ledger posting.                    |
+| `ReservationReleased` | Releases a hold when a transfer fails before posting.  |
 
 After a successful transfer, the service also publishes an in-process `TransferCompletedEvent`. This integration event is not stored in the account streams.
 
@@ -493,7 +501,7 @@ npm run build
 - Customer KYC fields and passport objects are stored without application-level encryption. Never submit real personal data to this demo.
 - Sessions have no rotation, device management, password reset, email verification, or rate limiting.
 - Money is represented internally as signed 64-bit minor units for one implicit two-decimal currency; multi-currency is not supported.
-- Transfer workflow records are retained indefinitely and there is no pending-transfer reconciliation worker.
+- Transfer workflow, reservation, compliance, and ledger idempotency records are retained indefinitely.
 - Optimistic concurrency conflicts are returned to clients and are not retried.
 - The event bus is in-process and fire-and-forget, with no durable delivery, backpressure, or handler panic recovery.
 - Event payloads have no schema versioning or upcasting strategy.

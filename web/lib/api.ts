@@ -11,6 +11,7 @@ import type {
   OnboardingRequest,
   Principal,
   TransferReceipt,
+  TransferStatus,
   WithdrawalReceipt,
 } from "./types";
 
@@ -83,6 +84,8 @@ export function transfer(
     }),
   );
 }
+
+export function getTransferStatus(id:string):Promise<TransferStatus>{return request<TransferStatus>(`/transfers/${encodeURIComponent(id)}`);}
 
 export function deposit(
   amount: number,

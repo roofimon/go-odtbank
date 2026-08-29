@@ -23,6 +23,18 @@ type Store interface {
 	// ListAggregates returns the IDs of all aggregates that have at least one
 	// event, sorted ascending.
 	ListAggregates() ([]string, error)
+
+	// SaveSnapshot stores the latest account snapshot, overwriting any older
+	// one for the same aggregate. A snapshot whose AsOfSequence is older than the
+	// one already stored is ignored.
+	SaveSnapshot(snap domain.AccountSnapshot) error
+
+	// LoadSnapshot returns the latest account snapshot. When no snapshot exists
+	// for the aggregate, it returns a nil pointer and ErrNoSnapshot.
+	LoadSnapshot(aggregateID string) (*domain.AccountSnapshot, error)
 }
 
-var ErrConcurrencyConflict = errors.New("event store: concurrency conflict on append")
+var (
+	ErrConcurrencyConflict = errors.New("event store: concurrency conflict on append")
+	ErrNoSnapshot          = errors.New("event store: no snapshot for aggregate")
+)

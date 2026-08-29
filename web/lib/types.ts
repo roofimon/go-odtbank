@@ -1,16 +1,18 @@
 export type Account = {
   id: string;
   balance: number;
+  reserved_balance: number;
+  available_balance: number;
   event_count: number;
 };
 
 export type StoredEvent = {
   seq: number;
-  type: "AccountOpened" | "MoneyDebited" | "MoneyCredited";
+  type: "AccountOpened" | "MoneyDebited" | "MoneyCredited" | "FundsReserved" | "ReservationCaptured" | "ReservationReleased";
   amount?: number;
   occurred_at: string;
   transfer_id?: string;
-  purpose?: "transfer" | "fee" | "adjustment" | "reversal";
+  purpose?: "transfer" | "fee" | "adjustment" | "reversal" | "reservation" | "reservation_captured" | "reservation_released";
   counterparty_account_id?: string;
   adjustment_id?: string;
   adjustment_reason?: string;
@@ -31,7 +33,10 @@ export type TransferReceipt = {
   DestinationAccountID: string;
   TransferAmount: number;
   FeeAmount: number;
+  CurrentStep: string;
 };
+
+export type TransferStatus = { transfer_id:string; source_account_id:string; destination_account_id:string; amount:number; fee:number; status:"pending"|"completed"|"failed"; failure_code?:string; initial_source_balance:number; final_source_balance:number; current_step:string; last_error?:string };
 
 export type DepositReceipt = {
   InitialAccount: AccountRef;

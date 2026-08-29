@@ -58,23 +58,29 @@ func TestTransferEndToEnd(t *testing.T) {
 		TransferAmount       float64
 		FeeAmount            float64
 	}
-	decodeResponse(t, response, http.StatusOK, &receipt)
-	if receipt.TransferID == "" || receipt.Status != domain.TransferCompleted {
+	decodeResponse(t, response, http.StatusAccepted, &receipt)
+	if receipt.TransferID == "" || receipt.Status != domain.TransferPending {
 		t.Fatalf("transfer identity = %+v", receipt)
-	}
-	if receipt.InitialSourceAccount.Balance != 10000 || receipt.FinalSourceAccount.Balance != 7500 {
-		t.Errorf("source balances = %v -> %v, want 100 -> 75", receipt.InitialSourceAccount.Balance, receipt.FinalSourceAccount.Balance)
 	}
 	if receipt.DestinationAccountID != "acc2" {
 		t.Errorf("destination account = %q, want acc2", receipt.DestinationAccountID)
+	}
+	for range 5 {
+		record, _ := transferService.Find(receipt.TransferID, "")
+		if record.Status != domain.TransferPending {
+			break
+		}
+		if err := transferService.Process(record); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if completedEvent.Amount != 2500 || completedEvent.SourceAccountID != "acc1" || completedEvent.DestinationAccountID != "acc2" {
 		t.Errorf("completed event = %+v", completedEvent)
 	}
 
-	assertE2EAccount(t, server, "acc1", 75, 2)
+	assertE2EAccount(t, server, "acc1", 75, 4)
 	assertE2EAccount(t, server, "acc2", 75, 2)
-	assertE2ELastEvent(t, server, "acc1", 1, "MoneyDebited", 25)
+	assertE2ELastEvent(t, server, "acc1", 3, "ReservationCaptured", 25)
 	assertE2ELastEvent(t, server, "acc2", 1, "MoneyCredited", 25)
 
 	retry, _ := http.NewRequest(http.MethodPost, server.URL+"/transfer", bytes.NewReader(requestBody))
@@ -98,7 +104,7 @@ func TestTransferEndToEnd(t *testing.T) {
 	if status.Status != domain.TransferCompleted {
 		t.Fatalf("status=%+v", status)
 	}
-	assertE2EAccount(t, server, "acc1", 75, 2)
+	assertE2EAccount(t, server, "acc1", 75, 4)
 }
 
 func seedE2EAccount(t *testing.T, store *eventstore.MemoryStore, id string, balance float64) {
