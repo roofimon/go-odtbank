@@ -60,3 +60,80 @@ created ──ReserveTransferFunds──► funds_reserved
 - **Event sourcing interplay**: the balance effects are recorded as account-stream events (`FundsReserved`/`ReservationCaptured` etc.); the saga's own steps live in the `transfers` / `account_reservations` / `compliance_decisions` / `ledger_postings` tables from migration `0008`.
 
 In short: reserve → comply → post → capture, with the reservation compounding the pre-post steps and retry-till-success guarding the post-irreversibility boundary.
+
+## Sequence diagram
+
+An ASCII sequence view of the full transfer flow. Phase 1 is the synchronous request (`202` + poll); Phase 2 is the background worker that drives the saga.
+
+```
+=====================================================================
+ TRANSFER SEQUENCE  --  POST /transfer   (event-sourced durable saga)
+=====================================================================
+
+Client   requireAuth  requireApproved  handleTransfer  TransferService     TransferSagaStore      Compliance  EventBus
+         middleware   Customer          (router.go:88)  (transfer_svc)       (postgres_store)     Checker
+  |             |            |                |               |                  |            |        |
+  |--POST /transfer (JSON: amount,            |               |                  |            |        |
+  |  source, dest) + Idempotency-Key + cookie |               |                  |            |        |
+  |------------------------------------->     |               |                  |            |        |
+  |             |-------------|               |               |                  |            |        |
+  |             | (session ck, role=customer, KYCApproved, AccountID OK)         |            |        |
+  |             |            |--------------->|                |                  |            |        |
+  |             |            |  authorizedAccount(): req.source == principal.AccountID?  |      |
+  |             |            |     NO -> 403 Forbidden        |                |            |        |
+  |             |            |                |-------------------->             |            |        |
+  |             |            |  Transfer(cmd)  [validate: amount>=100,           |            |        |
+  |             |            |   source!=dest, key<=128, service window]         |            |        |
+  |             |            |   fee = feePolicy.CalculateFee(amount)            |            |        |
+  |             |            |                |-------------------->             |            |        |
+  |             |            |                |--CreateTransfer(status=pending,   |            |        |
+  |             |            |                |  step=created)                    |            |        |
+  |             |            |                |   UNIQUE(source,key)             |            |        |
+  |             |            |                |   ok / conflict -> 409           |            |        |
+  |             |            |                |<--(record, created)--------|     |            |        |
+  |             |            |  wake <-  (non-blocking, fire worker)                |            |        |
+  |             |            |  receiptFromTransfer()                          |            |        |
+  |<--- 202 Accepted  {transfer_id, status:pending, current_step}              |            |        |
+  |             |            |                |               |                  |            |        |
+  |  [poll loop] GET /transfers/{id} -> Find() -> store.FindTransfer           |            |        |
+  |<--- 200 {status, current_step}   (repeat until terminal)                   |            |        |
+  |             |            |                |               |                  |            |        |
+  |===================================================================  BACKGROUND WORKER  ====|
+  |           go TransferService.Run()  [250ms ticker / wake signal]          |            |        |
+  |             |            |                |--ProcessDue()---------------|            |        |
+  |             |            |                |  store.ListDueTransfers()   |            |        |
+  |             |            |                |<--(pending items)--------| |            |        |
+  |             |            |  Process(r): step-machine, each step = own tx|            |        |
+  |             |            |  +-------------------------------------------------------+ |        |
+  |             |            |  | created        -> funds_reserved                          |      |
+  |             |            |  |   ReserveTransferFunds():                                  |      |
+  |             |            |  |     pg_advisory_xact_lock(source)                         |      |
+  |             |            |  |     replay events; AvailableBalance >= amount+fee         |      |
+  |             |            |  |     append FundsReserved; reservation state=reserved       |      |
+  |             |            |  |       (insufficient -> release + FAIL)                     |      |
+  |             |            |  | funds_reserved -> compliance_approved                      |      |
+  |             |            |  |   compliance.CheckTransfer(r) ------------------> Check()  |      |
+  |             |            |  |   RecordComplianceDecision()                               |      |
+  |             |            |  |   rejected -> ReleaseReservation + FAIL(compliance_rejected)|      |
+  |             |            |  | compliance_approved -> ledger_posted                       |      |
+  |             |            |  |   PostTransferLedger() [ATOMIC, both accounts]             |      |
+  |             |            |  |     lock both ordered (min/max id) => no deadlock          |      |
+  |             |            |  |     source: -amount, -fee    dest: +amount                 |      |
+  |             |            |  |     append Money* events; insert ledger_postings           |      |
+  |             |            |  | ledger_posted -> reservation_captured                      |      |
+  |             |            |  |   CaptureTransferReservation():                            |      |
+  |             |            |  |     append ReservationCaptured; state=captured             |      |
+  |             |            |  |       (post-ledger err -> RETRY capture, never reverse)    |      |
+  |             |            |  | reservation_captured -> completed                          |      |
+  |             |            |  |   UpdateTransferSaga(status=completed)                      |      |
+  |             |            |  |   EventBus.Publish(TransferCompletedEvent) ---------------->Publish()|
+  |             |            |  +-------------------------------------------------------+ |      |
+  |             |            |                |               |                  |            |
+  Client polls GET /transfers/{id} until status = completed | failed (see "Compensating..." above)
+```
+
+Error/retry policy (`handleStepError`/`retry`, `transfer_service.go:158`, `:173`):
+
+- **Pre-ledger, permanent** (`ErrAccountNotFound`, `InsufficientFunds`) → release reservation (if held) → `failed` with code (`account_not_found` / `insufficient_funds`).
+- **Pre-ledger, transient** → exponential backoff `1s << min(attempt-1, 4)` (max 16s); on the 5th attempt, release + `failed` (`retry_exhausted`).
+- **Post-ledger, transient** → backoff capped at 30s, **no attempt-count limit** → **retry the capture only; never reverse posted money**.
