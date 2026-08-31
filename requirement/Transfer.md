@@ -42,7 +42,7 @@ created ──ReserveTransferFunds──► funds_reserved
 - **`compliance_approved`**: compliance decision recorded; rejection releases the hold and fails the transfer.
 - **`ledger_posted`**: the actual money move — source debit (amount + fee) and destination credit — is written **atomically in one tx** over both accounts (advisory locks in `PostTransferLedger`, `postgres_store.go:719`).
 - **`reservation_captured`**: the hold is closed *after* posting, so a capture is retried until done rather than reversing money that's already moved.
-- Final `UpdateTransferSaga` → `completed`, then publishes `TransferCompletedEvent` to the in-process `EventBus` (fire-and-forget, `event_bus.go:26`).
+- Final `UpdateTransferSaga` → `completed`. The ledger post also enqueues a durable `TransferCompletedEvent` outbox row in the same transaction; the durable bus worker then delivers it to subscribers (see `EventSourcing.md`).
 
 ## Compensating actions and retry
 

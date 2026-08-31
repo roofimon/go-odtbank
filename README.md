@@ -469,7 +469,7 @@ A withdrawal may reduce the balance to exactly zero but cannot exceed the availa
 | `ReservationCaptured` | Closes a hold after ledger posting.                    |
 | `ReservationReleased` | Releases a hold when a transfer fails before posting.  |
 
-After a successful transfer, the service also publishes an in-process `TransferCompletedEvent`. This integration event is not stored in the account streams.
+After a successful transfer, the service enqueues a `TransferCompletedEvent` on a durable outbox (`integration_events`, migration `0010`) in the same transaction as the ledger post; a background worker then delivers it to subscribers with retry, exponential backoff, and dead-lettering. This integration event is not stored in the account streams.
 
 ## Build and test
 
@@ -503,7 +503,7 @@ npm run build
 - Money is represented internally as signed 64-bit minor units for one implicit two-decimal currency; multi-currency is not supported.
 - Transfer workflow, reservation, compliance, and ledger idempotency records are retained indefinitely.
 - Optimistic concurrency conflicts are returned to clients and are not retried.
-- The event bus is in-process and fire-and-forget, with no durable delivery, backpressure, or handler panic recovery.
+- The durable event bus is single-process and at-least-once: it has no cross-process consumer group and no consumer-side deduplication, so a consumer must tolerate duplicate delivery.
 - Event payloads have no schema versioning or upcasting strategy.
 - Account reads replay the complete event stream; snapshots are not implemented.
 
