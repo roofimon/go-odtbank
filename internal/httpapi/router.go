@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type Dependencies struct {
 	AuthService       domain.AuthService
 	ReviewService     domain.ReviewService
 	AdjustmentService domain.AdjustmentService
+	EventBusStore     domain.EventBusStore
 	CookieSecure      bool
 	CORSOrigins       string
 }
@@ -75,6 +77,10 @@ func NewRouter(deps Dependencies) http.Handler {
 		router.HandleFunc("/admin/adjustments/{id}", admin(handleGetAdjustment(deps.AdjustmentService))).Methods(http.MethodGet)
 		router.HandleFunc("/admin/adjustments/{id}/approve", admin(handleApproveAdjustment(deps.AdjustmentService))).Methods(http.MethodPost)
 		router.HandleFunc("/admin/adjustments/{id}/reject", admin(handleRejectAdjustment(deps.AdjustmentService))).Methods(http.MethodPost)
+	}
+	if deps.EventBusStore != nil {
+		router.HandleFunc("/admin/event-bus", admin(handleListEvents(deps.EventBusStore))).Methods(http.MethodGet)
+		router.HandleFunc("/admin/event-bus/{id}/requeue", admin(handleRequeueEvent(deps.EventBusStore))).Methods(http.MethodPost)
 	}
 	return withCORS(router, deps.CORSOrigins)
 }
@@ -270,11 +276,11 @@ func handleListAccounts(store eventstore.Store, repo accountReader) http.Handler
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
-				}
+			}
 			a := balanceAccount(repo, principal.AccountID, events)
 			writeJSON(w, http.StatusOK, map[string]any{"accounts": []accountDTO{{ID: principal.AccountID, Balance: a.Balance, ReservedBalance: a.ReservedBalance, AvailableBalance: a.AvailableBalance, EventCount: len(events)}}})
 			return
-			}
+		}
 		accounts, err := listAccounts(store, repo)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -321,16 +327,16 @@ func handleAdminAccountEvents(store eventstore.Store, repo accountReader) http.H
 		if id == "" {
 			writeError(w, http.StatusBadRequest, "account id is required")
 			return
-			}
+		}
 		events, err := store.Load(id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
-			}
+		}
 		if len(events) == 0 {
 			writeError(w, http.StatusNotFound, domain.ErrAccountNotFound.Error())
 			return
-			}
+		}
 		account := balanceAccount(repo, id, events)
 		writeJSON(w, http.StatusOK, map[string]any{"aggregate_id": id, "balance": account.Balance, "event_count": len(events), "events": toEventDTOs(events)})
 	}
@@ -490,6 +496,34 @@ func handleRejectAdjustment(s domain.AdjustmentService) http.HandlerFunc {
 			return
 		}
 		if err := s.Reject(mux.Vars(r)["id"], principalFromRequest(r).AdminID, request.Reason); err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleListEvents returns outbox rows for the durable event bus. The status query
+// param filters ("", "scheduled", "published", "dead_lettered").
+func handleListEvents(store domain.EventBusStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		events, err := store.ListIntegrationEvents(r.URL.Query().Get("status"), 0)
+		if err != nil {
+			writeError(w, statusForError(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": events})
+	}
+}
+
+func handleRequeueEvent(store domain.EventBusStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid event id")
+			return
+		}
+		if err := store.RequeueIntegrationEvent(id, time.Now().UTC()); err != nil {
 			writeError(w, statusForError(err), err.Error())
 			return
 		}

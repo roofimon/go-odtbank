@@ -34,21 +34,30 @@ func main() {
 		log.Fatalf("seed accounts: %v", err)
 	}
 
-	eb := eventbus.NewEventBus()
-
 	// 2. Initialize business logic
 	feePolicy := &policy.ZeroFeePolicy{}
 	timeService := &policy.DefaultTimeService{ServiceAvailable: true}
-
-	eventBusFunc := func(event domain.TransferCompletedEvent) {
-		eb.Publish(event)
-	}
 
 	transferStore, ok := store.(domain.TransferSagaStore)
 	if !ok {
 		log.Fatal("configured store does not support atomic transfers")
 	}
-	transferService := service.NewTransferService(transferStore, feePolicy, timeService, eventBusFunc)
+
+	// The durably-recorded event bus: the store appends a TransferCompleted outbox
+	// row in the same transaction as the ledger post, then this worker delivers it
+	// with retry, backoff, and dead-lettering instead of a fire-and-forget publish.
+	eventBusStore, ok := store.(domain.EventBusStore)
+	if !ok {
+		log.Fatal("configured store does not support the durable event bus")
+	}
+	bus := eventbus.NewDurableBus(eventBusStore, eventbus.Options{Interval: 250 * time.Millisecond, MaxAttempts: 5, MaxBackoff: 30 * time.Second})
+	bus.Register("TransferCompleted", func(ctx context.Context, event domain.TransferCompletedEvent) error {
+		log.Printf("[audit] transfer completed: %s amount=%s fee=%s source=%s dest=%s", event.TransferID, event.Amount, event.Fee, event.SourceAccountID, event.DestinationAccountID)
+		return nil
+	})
+	go bus.Run(context.Background())
+
+	transferService := service.NewTransferService(transferStore, feePolicy, timeService)
 	go transferService.Run(context.Background())
 	depositService := service.NewDepositService(store)
 	withdrawService := service.NewWithdrawService(store)
@@ -100,6 +109,7 @@ func main() {
 		AuthService:       authService,
 		ReviewService:     reviewService,
 		AdjustmentService: adjustmentService,
+		EventBusStore:     eventBusStore,
 		CookieSecure:      os.Getenv("COOKIE_SECURE") == "true",
 		CORSOrigins:       os.Getenv("CORS_ORIGINS"),
 	})
