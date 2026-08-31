@@ -282,6 +282,7 @@ func (s *PostgresStore) RejectApplication(id, adminID, reason string, at time.Ti
 var _ domain.ReviewStore = (*PostgresStore)(nil)
 var _ domain.TransferSagaStore = (*PostgresStore)(nil)
 var _ domain.AdjustmentStore = (*PostgresStore)(nil)
+var _ domain.EventBusStore = (*PostgresStore)(nil)
 
 func (s *PostgresStore) CreateAdjustment(r domain.AdjustmentRequest) (*domain.AdjustmentRequest, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -766,6 +767,10 @@ func (s *PostgresStore) PostTransferLedger(r domain.TransferRecord, at time.Time
 	if _, e = tx.Exec(ctx, `INSERT INTO ledger_postings(transfer_id,posted_at) VALUES($1,$2)`, r.ID, at); e != nil {
 		return 0, e
 	}
+	payload, _ := json.Marshal(domain.TransferCompletedEvent{TransferID: r.ID, Timestamp: at, Amount: r.Amount, SourceAccountID: r.SourceAccountID, DestinationAccountID: r.DestinationAccountID, Fee: r.Fee})
+	if e = s.appendIntegrationEventTx(ctx, tx, domain.IntegrationEvent{TransferID: r.ID, EventType: "TransferCompleted", Payload: payload, Status: domain.IntegrationEventScheduled, NextAttemptAt: at, CreatedAt: at}); e != nil {
+		return 0, e
+	}
 	if e = tx.Commit(ctx); e != nil {
 		return 0, e
 	}
@@ -854,6 +859,127 @@ func (s *PostgresStore) WithdrawAvailable(accountID string, amount domain.Money,
 	}
 	return initial, domain.ReplayAccount(accountID, append(events, ev)), nil
 }
+
+// execer is implemented by both pgx.Tx and *pgxpool.Pool, so the outbox insert
+// works inside a transaction (atomic with the ledger post) or standalone.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// appendIntegrationEventTx enqueues a durable outbox row inside a transaction so
+// the row commits atomically with the ledger posting. It is idempotent on
+// (transfer_id, event_type) via the unique index, so a retried ledger post never
+// enqueues the event twice.
+func (s *PostgresStore) appendIntegrationEventTx(ctx context.Context, tx execer, event domain.IntegrationEvent) error {
+	payload := event.Payload
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO integration_events (transfer_id, event_type, payload, status, next_attempt_at, created_at)
+		VALUES ($1, $2, $3, 'scheduled', $4, $5)
+		ON CONFLICT (transfer_id, event_type) DO NOTHING
+	`, event.TransferID, event.EventType, payload, event.NextAttemptAt, event.CreatedAt)
+	return err
+}
+
+func (s *PostgresStore) AppendIntegrationEvent(event domain.IntegrationEvent) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if event.NextAttemptAt.IsZero() {
+		event.NextAttemptAt = event.CreatedAt
+	}
+	return s.appendIntegrationEventTx(ctx, s.pool, event)
+}
+
+func scanIntegrationEvent(row pgx.Row) (*domain.IntegrationEvent, error) {
+	var e domain.IntegrationEvent
+	var payload []byte
+	err := row.Scan(&e.ID, &e.TransferID, &e.EventType, &payload, &e.Status, &e.AttemptCount, &e.NextAttemptAt, &e.LastError, &e.PublishedAt, &e.CreatedAt)
+	e.Payload = payload
+	return &e, err
+}
+
+const integrationEventColumns = `id,transfer_id,event_type,payload,status,attempt_count,next_attempt_at,last_error,published_at,created_at`
+
+func (s *PostgresStore) ListDueIntegrationEvents(now time.Time, limit int) ([]domain.IntegrationEvent, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.pool.Query(ctx, `SELECT `+integrationEventColumns+` FROM integration_events WHERE status='scheduled' AND next_attempt_at<=$1 ORDER BY id LIMIT $2`, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.IntegrationEvent{}
+	for rows.Next() {
+		member, e := scanIntegrationEvent(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, *member)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) MarkIntegrationEventPublished(id int64, at time.Time) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tag, err := s.pool.Exec(ctx, `UPDATE integration_events SET status='published', published_at=$2 WHERE id=$1 AND status='scheduled'`, id, at)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *PostgresStore) RecordIntegrationEventFailure(event domain.IntegrationEvent, nextAttemptAt time.Time, deadLetter bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE integration_events SET
+			status = CASE WHEN $2 THEN 'dead_lettered' ELSE status END,
+			attempt_count = $3,
+			last_error = $4,
+			next_attempt_at = CASE WHEN $2 THEN next_attempt_at ELSE $5 END
+		WHERE id = $1 AND status = 'scheduled'
+	`, event.ID, deadLetter, event.AttemptCount, event.LastError, nextAttemptAt)
+	return err
+}
+
+func (s *PostgresStore) RequeueIntegrationEvent(id int64, at time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `UPDATE integration_events SET status='scheduled', attempt_count=0, last_error='', next_attempt_at=$2, published_at=NULL WHERE id=$1 AND status='dead_lettered'`, id, at)
+	return err
+}
+
+func (s *PostgresStore) ListIntegrationEvents(status string, limit int) ([]domain.IntegrationEvent, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	query := `SELECT ` + integrationEventColumns + ` FROM integration_events WHERE $1='' OR status=$1 ORDER BY id DESC`
+	args := []any{status}
+	if limit > 0 {
+		query += ` LIMIT $2`
+		args = append(args, limit)
+	}
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.IntegrationEvent{}
+	for rows.Next() {
+		member, e := scanIntegrationEvent(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, *member)
+	}
+	return out, rows.Err()
+}
+
 func minString(a, b string) string {
 	if a < b {
 		return a

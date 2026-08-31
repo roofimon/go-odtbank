@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -24,6 +25,8 @@ type MemoryStore struct {
 	reservations        map[string]memoryReservation
 	ledgerPostings      map[string]bool
 	complianceDecisions map[string]string
+	integrationEvents   []domain.IntegrationEvent
+	nextIntegrationID   int64
 }
 
 type memoryReservation struct {
@@ -44,6 +47,7 @@ func NewMemoryStore() *MemoryStore {
 		reservations:        make(map[string]memoryReservation),
 		ledgerPostings:      make(map[string]bool),
 		complianceDecisions: make(map[string]string),
+		nextIntegrationID:   1,
 	}
 }
 
@@ -146,6 +150,7 @@ var _ domain.AuthStore = (*MemoryStore)(nil)
 var _ domain.ReviewStore = (*MemoryStore)(nil)
 var _ domain.TransferSagaStore = (*MemoryStore)(nil)
 var _ domain.AdjustmentStore = (*MemoryStore)(nil)
+var _ domain.EventBusStore = (*MemoryStore)(nil)
 
 func (m *MemoryStore) CreateAdjustment(r domain.AdjustmentRequest) (*domain.AdjustmentRequest, error) {
 	m.mu.Lock()
@@ -397,6 +402,8 @@ func (m *MemoryStore) PostTransferLedger(r domain.TransferRecord, at time.Time) 
 	m.streams[r.SourceAccountID] = src
 	m.streams[r.DestinationAccountID] = dst
 	m.ledgerPostings[r.ID] = true
+	payload, _ := json.Marshal(domain.TransferCompletedEvent{TransferID: r.ID, Timestamp: at, Amount: r.Amount, SourceAccountID: r.SourceAccountID, DestinationAccountID: r.DestinationAccountID, Fee: r.Fee})
+	m.appendIntegrationEventUnsafe(domain.IntegrationEvent{TransferID: r.ID, EventType: "TransferCompleted", Payload: payload, Status: domain.IntegrationEventScheduled, NextAttemptAt: at, CreatedAt: at})
 	return domain.ReplayAccount(r.SourceAccountID, src).Balance, nil
 }
 func (m *MemoryStore) CaptureTransferReservation(r domain.TransferRecord, at time.Time) error {
@@ -569,6 +576,122 @@ func (m *MemoryStore) RejectApplication(id, adminID, reason string, at time.Time
 	c.RejectionReason = reason
 	m.customers[id] = c
 	return nil
+}
+
+// appendIntegrationEventUnsafe enqueues a durable outbox row. Callers must hold
+// m.mu (write). It is idempotent on (transfer_id, event_type), so a retried
+// ledger post never enqueues the event twice.
+func (m *MemoryStore) appendIntegrationEventUnsafe(event domain.IntegrationEvent) {
+	for _, existing := range m.integrationEvents {
+		if existing.TransferID == event.TransferID && existing.EventType == event.EventType {
+			return
+		}
+	}
+	event.ID = m.nextIntegrationID
+	m.nextIntegrationID++
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if event.Status == "" {
+		event.Status = domain.IntegrationEventScheduled
+	}
+	m.integrationEvents = append(m.integrationEvents, event)
+}
+
+// AppendIntegrationEvent enqueues a durable outbox row.
+func (m *MemoryStore) AppendIntegrationEvent(event domain.IntegrationEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appendIntegrationEventUnsafe(event)
+	return nil
+}
+
+func (m *MemoryStore) ListDueIntegrationEvents(now time.Time, limit int) ([]domain.IntegrationEvent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := []domain.IntegrationEvent{}
+	for _, e := range m.integrationEvents {
+		if e.Status == domain.IntegrationEventScheduled && !e.NextAttemptAt.After(now) {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *MemoryStore) MarkIntegrationEventPublished(id int64, at time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.integrationEvents {
+		if m.integrationEvents[i].ID == id {
+			if m.integrationEvents[i].Status != domain.IntegrationEventScheduled {
+				return false, nil
+			}
+			m.integrationEvents[i].Status = domain.IntegrationEventPublished
+			m.integrationEvents[i].PublishedAt = &at
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *MemoryStore) RecordIntegrationEventFailure(event domain.IntegrationEvent, nextAttemptAt time.Time, deadLetter bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.integrationEvents {
+		if m.integrationEvents[i].ID == event.ID {
+			if m.integrationEvents[i].Status != domain.IntegrationEventScheduled {
+				return nil
+			}
+			m.integrationEvents[i].AttemptCount = event.AttemptCount
+			m.integrationEvents[i].LastError = event.LastError
+			if deadLetter {
+				m.integrationEvents[i].Status = domain.IntegrationEventDeadLetter
+			} else {
+				m.integrationEvents[i].NextAttemptAt = nextAttemptAt
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *MemoryStore) RequeueIntegrationEvent(id int64, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.integrationEvents {
+		if m.integrationEvents[i].ID == id {
+			if m.integrationEvents[i].Status != domain.IntegrationEventDeadLetter {
+				return nil
+			}
+			m.integrationEvents[i].Status = domain.IntegrationEventScheduled
+			m.integrationEvents[i].AttemptCount = 0
+			m.integrationEvents[i].LastError = ""
+			m.integrationEvents[i].NextAttemptAt = at
+			m.integrationEvents[i].PublishedAt = nil
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *MemoryStore) ListIntegrationEvents(status string, limit int) ([]domain.IntegrationEvent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := []domain.IntegrationEvent{}
+	for _, e := range m.integrationEvents {
+		if status == "" || e.Status == status {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // Append stores the event at the next sequence position for its aggregate,
