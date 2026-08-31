@@ -20,12 +20,10 @@ func TestTransferEndToEnd(t *testing.T) {
 	seedE2EAccount(t, store, "acc1", 100)
 	seedE2EAccount(t, store, "acc2", 50)
 
-	var completedEvent domain.TransferCompletedEvent
 	transferService := service.NewTransferService(
 		store,
 		&policy.ZeroFeePolicy{},
 		&policy.DefaultTimeService{ServiceAvailable: true},
-		func(event domain.TransferCompletedEvent) { completedEvent = event },
 	)
 	server := httptest.NewServer(httpapi.NewRouter(httpapi.Dependencies{
 		Store:           store,
@@ -74,7 +72,18 @@ func TestTransferEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if completedEvent.Amount != 2500 || completedEvent.SourceAccountID != "acc1" || completedEvent.DestinationAccountID != "acc2" {
+	outbox, err := store.ListIntegrationEvents("", 0)
+	if err != nil {
+		t.Fatalf("list integration events: %v", err)
+	}
+	if len(outbox) != 1 {
+		t.Fatalf("outbox rows=%d, want 1", len(outbox))
+	}
+	var completedEvent domain.TransferCompletedEvent
+	if err := json.Unmarshal(outbox[0].Payload, &completedEvent); err != nil {
+		t.Fatalf("decode outbox payload: %v", err)
+	}
+	if outbox[0].TransferID != receipt.TransferID || completedEvent.Amount != 2500 || completedEvent.SourceAccountID != "acc1" || completedEvent.DestinationAccountID != "acc2" {
 		t.Errorf("completed event = %+v", completedEvent)
 	}
 

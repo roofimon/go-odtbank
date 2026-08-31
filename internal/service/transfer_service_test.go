@@ -12,9 +12,6 @@ import (
 	"go-odtbank/internal/service"
 )
 
-type capturedEvent struct {
-	got domain.TransferCompletedEvent
-}
 type complianceResult struct {
 	approved bool
 	err      error
@@ -53,8 +50,7 @@ func TestTransfer_IdempotentRetryAndConflict(t *testing.T) {
 	}{{"a", 10000}, {"b", 0}} {
 		_ = store.Append(domain.AccountOpened{Aggregate: item.id, Type: "AccountOpened", ID: item.id, InitialBalance: item.balance, Occurred: time.Now()}, 0)
 	}
-	published := 0
-	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, func(domain.TransferCompletedEvent) { published++ })
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true})
 	cmd := domain.TransferCommand{Amount: 1000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "same"}
 	first, err := svc.Transfer(cmd)
 	if err != nil {
@@ -68,8 +64,9 @@ func TestTransfer_IdempotentRetryAndConflict(t *testing.T) {
 	if completed.Status != domain.TransferCompleted {
 		t.Fatalf("status=%s", completed.Status)
 	}
-	if published != 1 {
-		t.Fatalf("published=%d", published)
+	outbox, _ := store.ListIntegrationEvents("", 0)
+	if len(outbox) != 1 {
+		t.Fatalf("outbox rows=%d, want 1", len(outbox))
 	}
 	cmd.Amount = 2000
 	if _, err = svc.Transfer(cmd); !errors.Is(err, domain.ErrIdempotencyConflict) {
@@ -85,7 +82,7 @@ func TestTransfer_ConcurrentDuplicateExecutesOnce(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
 	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
-	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true})
 	cmd := domain.TransferCommand{Amount: 1000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "concurrent"}
 	var wg sync.WaitGroup
 	ids := make(chan string, 2)
@@ -136,12 +133,7 @@ func TestTransfer_AppendsEventsAndReplaysState(t *testing.T) {
 	seed("acc1", 10000)
 	seed("acc2", 5000)
 
-	var captured capturedEvent
-	bus := func(ev domain.TransferCompletedEvent) {
-		captured.got = ev
-	}
-
-	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, bus)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true})
 
 	receipt, err := svc.Transfer(domain.TransferCommand{Amount: 2500, SourceAccountID: "acc1", DestinationAccountID: "acc2", IdempotencyKey: "test-key"})
 	if err != nil {
@@ -174,8 +166,12 @@ func TestTransfer_AppendsEventsAndReplaysState(t *testing.T) {
 		t.Errorf("replayed acc2 balance = %v, want 75", dst.Balance)
 	}
 
-	if captured.got.Amount != 2500 || captured.got.SourceAccountID != "acc1" || captured.got.DestinationAccountID != "acc2" {
-		t.Errorf("captured event mismatch: %+v", captured.got)
+	outbox, _ := store.ListIntegrationEvents("", 0)
+	if len(outbox) != 1 {
+		t.Fatalf("outbox rows=%d, want 1", len(outbox))
+	}
+	if outbox[0].TransferID != receipt.TransferID || outbox[0].EventType != "TransferCompleted" {
+		t.Errorf("outbox event mismatch: %+v", outbox[0])
 	}
 }
 
@@ -183,7 +179,7 @@ func TestTransferSaga_ComplianceRejectionReleasesReservation(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
 	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
-	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true})
 	svc.SetComplianceChecker(complianceResult{approved: false})
 	receipt, err := svc.Transfer(domain.TransferCommand{Amount: 5000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "reject"})
 	if err != nil {
@@ -216,7 +212,7 @@ func TestTransferSaga_ConcurrentReservationsCannotOverspend(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
 	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
-	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true})
 	one, _ := svc.Transfer(domain.TransferCommand{Amount: 8000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "one"})
 	two, _ := svc.Transfer(domain.TransferCommand{Amount: 8000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "two"})
 	r1, _ := svc.Find(one.TransferID, "")
@@ -276,7 +272,7 @@ func TestTransferSaga_ExhaustedComplianceRetriesReleaseFunds(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	_ = store.Append(domain.AccountOpened{Aggregate: "a", Type: "AccountOpened", ID: "a", InitialBalance: 10000, Occurred: time.Now()}, 0)
 	_ = store.Append(domain.AccountOpened{Aggregate: "b", Type: "AccountOpened", ID: "b", Occurred: time.Now()}, 0)
-	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	svc := service.NewTransferService(store, &policy.ZeroFeePolicy{}, &policy.DefaultTimeService{ServiceAvailable: true})
 	svc.SetComplianceChecker(complianceResult{err: errors.New("compliance unavailable")})
 	receipt, _ := svc.Transfer(domain.TransferCommand{Amount: 3000, SourceAccountID: "a", DestinationAccountID: "b", IdempotencyKey: "retry"})
 	r, _ := svc.Find(receipt.TransferID, "")

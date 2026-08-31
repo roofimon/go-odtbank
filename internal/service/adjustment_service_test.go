@@ -64,7 +64,7 @@ func TestAdjustment_TransferReversalRefundsFeeAndCanRunOnce(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	seedAdjustmentAccount(t, store, "source", 10000)
 	seedAdjustmentAccount(t, store, "destination", 1000)
-	transferService := service.NewTransferService(store, &policy.FlatFeePolicy{Fee: 100}, &policy.DefaultTimeService{ServiceAvailable: true}, nil)
+	transferService := service.NewTransferService(store, &policy.FlatFeePolicy{Fee: 100}, &policy.DefaultTimeService{ServiceAvailable: true})
 	receipt, err := transferService.Transfer(domain.TransferCommand{SourceAccountID: "source", DestinationAccountID: "destination", Amount: 2000, IdempotencyKey: "reversal-test"})
 	if err != nil {
 		t.Fatal(err)

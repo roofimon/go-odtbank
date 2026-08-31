@@ -19,13 +19,12 @@ type TransferService struct {
 	store       domain.TransferSagaStore
 	feePolicy   domain.FeePolicy
 	timeService domain.TimeService
-	eventBus    func(domain.TransferCompletedEvent)
 	compliance  domain.ComplianceChecker
 	wake        chan struct{}
 }
 
-func NewTransferService(store domain.TransferSagaStore, fee domain.FeePolicy, ts domain.TimeService, bus func(domain.TransferCompletedEvent)) *TransferService {
-	return &TransferService{store: store, feePolicy: fee, timeService: ts, eventBus: bus, compliance: approveAllCompliance{}, wake: make(chan struct{}, 1)}
+func NewTransferService(store domain.TransferSagaStore, fee domain.FeePolicy, ts domain.TimeService) *TransferService {
+	return &TransferService{store: store, feePolicy: fee, timeService: ts, compliance: approveAllCompliance{}, wake: make(chan struct{}, 1)}
 }
 func (s *TransferService) SetComplianceChecker(checker domain.ComplianceChecker) {
 	if checker != nil {
@@ -145,12 +144,9 @@ func (s *TransferService) Process(r *domain.TransferRecord) error {
 		}
 		return s.advance(r, domain.TransferSagaUpdate{ExpectedStep: r.CurrentStep, CurrentStep: domain.SagaReservationCaptured, Status: domain.TransferPending, NextAttemptAt: now})
 	case domain.SagaReservationCaptured:
-		ok, e := s.store.UpdateTransferSaga(r.ID, domain.TransferSagaUpdate{ExpectedStep: r.CurrentStep, CurrentStep: r.CurrentStep, Status: domain.TransferCompleted, NextAttemptAt: now}, now)
+		_, e := s.store.UpdateTransferSaga(r.ID, domain.TransferSagaUpdate{ExpectedStep: r.CurrentStep, CurrentStep: r.CurrentStep, Status: domain.TransferCompleted, NextAttemptAt: now}, now)
 		if e != nil {
 			return e
-		}
-		if ok && s.eventBus != nil {
-			s.eventBus(domain.TransferCompletedEvent{TransferID: r.ID, Timestamp: now, Amount: r.Amount, SourceAccountID: r.SourceAccountID, DestinationAccountID: r.DestinationAccountID, Fee: r.Fee})
 		}
 	}
 	return nil
